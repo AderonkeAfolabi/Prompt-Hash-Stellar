@@ -1,26 +1,78 @@
 import mongoose from "mongoose";
 
-export type AuditAction =
-  | "challenge_issued"
-  | "challenge_rate_limited"
-  | "unlock_success"
-  | "unlock_invalid_signature"
-  | "unlock_expired_challenge"
-  | "unlock_no_access"
-  | "unlock_integrity_failure"
-  | "unlock_error"
-  | "unlock_rate_limited"
-  | "unlock_replay_detected"
-  | "unlock_ledger_failure"
-  | "unlock_stale_quote"
-  | "admin_auth_success"
-  | "admin_auth_denied"
-  | "notification_preference_updated"
-  | "notification_mandatory_delivered"
-  | "support_access_granted"
-  | "support_access_revoked"
-  | "support_access_used"
-  | "support_access_denied";
+/**
+ * Every action code the audit trail accepts. Grouped by the export scope they
+ * belong to (see `AUDIT_EXPORT_SCOPES` in services/auditTrail.ts).
+ */
+export const AUDIT_ACTIONS = [
+  // unlock / challenge flow
+  "challenge_issued",
+  "challenge_rate_limited",
+  "unlock_success",
+  "unlock_invalid_signature",
+  "unlock_expired_challenge",
+  "unlock_no_access",
+  "unlock_integrity_failure",
+  "unlock_error",
+  "unlock_rate_limited",
+  "unlock_replay_detected",
+  "unlock_ledger_failure",
+  "unlock_stale_quote",
+  "unlock_stale_listing_snapshot",
+  // admin access
+  "admin_auth_success",
+  "admin_auth_denied",
+  "audit_export",
+  "audit_sensitive_field_access",
+  "audit_sensitive_field_denied",
+  // moderation (api/prompts/moderate.ts)
+  "prompt_restrict",
+  "prompt_reinstate",
+  "prompt_retire",
+  "moderation_unauthorized",
+  "moderation_error",
+  // disputed purchase resolution (#755)
+  "dispute_unlock_failed",
+  "dispute_unlock_succeeded",
+  "dispute_refund_requested",
+  "dispute_retry_scheduled",
+  "dispute_refund_approved",
+  "dispute_refund_rejected",
+  "dispute_resolved",
+  "dispute_escalated",
+  "dispute_refund_settled",
+  // ownership and access changes
+  "ownership_transfer_requested",
+  "ownership_transfer_accepted",
+  "ownership_transfer_rejected",
+  "ownership_transfer_cancelled",
+  "role_assigned",
+  "role_revoked",
+  "permission_granted",
+  "permission_revoked",
+  "access_granted",
+  "access_revoked",
+  "entitlement_repair",
+  "policy_override_created",
+  "policy_override_revoked",
+  "operation_recovery",
+  "receipt_generated",
+  "prompt_lifecycle_transition",
+  "prompt_lifecycle_transition_denied",
+  "moderation.override",
+  "identity_link",
+  "identity_unlink",
+  // risk-scored abuse detection
+  "abuse_risk_decision",
+  "abuse_risk_review_resolved",
+  "abuse_risk_subject_reset",
+  // retention holds
+  "retention_hold_created",
+  "retention_hold_released",
+  "retention_hold_reconciled",
+] as const;
+
+export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
 export type AuditResult = "success" | "failure" | "blocked";
 

@@ -11,6 +11,26 @@ import searchRouter from "./routes/searchRoutes";
 import { fulfillmentRouter } from "./routes/fulfillmentRoutes";
 import { reviewRouter } from "./routes/reviewRoutes";
 import { notificationRouter } from "./routes/notificationRoutes";
+import { auditRouter } from "./routes/auditRoutes";
+import { libraryRouter } from "./routes/libraryRoutes";
+import { provenanceRouter } from "./routes/provenanceRoutes";
+import { walletSessionRouter } from "./routes/walletSessionRoutes";
+import { marketplaceRouter } from "./routes/marketplaceRoutes";
+import { featureFlagRouter } from "./routes/featureFlagRoutes.js";
+import { supportCaseRouter } from "./routes/supportCaseRoutes.js";
+import { qualityCheckRouter } from "./routes/qualityCheckRoutes.js";
+import { recommendationFeedbackRouter } from "./routes/recommendationFeedbackRoutes.js";
+import { operationalHealthRouter } from "./routes/operationalHealthRoutes.js";
+import { drRouter } from "./routes/drRoutes.js";
+import { exportRouter } from "./routes/exportRoutes";
+import { policyLimitRouter } from "./routes/policyLimitRoutes";
+import { operationRecoveryRouter } from "./routes/operationRecoveryRoutes";
+import { receiptRouter } from "./routes/receiptRoutes";
+import { maintenanceBannerRouter } from "./routes/maintenanceBannerRoutes";
+import { externalIdentityRouter } from "./routes/externalIdentityRoutes";
+import { abuseRiskRouter } from "./routes/abuseRiskRoutes";
+import { retentionHoldRouter } from "./routes/retentionHoldRoutes";
+import { lifecycleCaptureRouter, lifecycleReportRouter } from "./routes/lifecycleAnalyticsRoutes";
 import { adminRateLimitRouter } from "./routes/adminRateLimitRoutes";
 import { supportAccessRouter } from "./routes/supportAccessRoutes";
 import { payoutLedgerRouter } from "./routes/payoutLedgerRoutes";
@@ -52,12 +72,37 @@ app.use("/api/governance", governanceRouter); // Issue #113
 app.use("/api/search", searchRouter);
 app.use("/api/fulfillment", fulfillmentRouter);
 app.use("/api/reviews", reviewRouter);
-app.use("/api/notifications", authLimiter, notificationRouter);
-app.use("/api/admin/rate-limits", adminRateLimitRouter);
-app.use("/api/admin/support-access", supportAccessRouter);
-app.use("/api/payouts", payoutLedgerRouter);
-app.use("/api/entitlements", entitlementRouter);
-app.use("/api/bundles", bundleRouter);
+app.use("/api/notifications", notificationRouter);
+app.use("/api/audit", auditRouter); // #783
+app.use("/api/wallet-session", walletSessionRouter); // #753, #784
+app.use("/api/external-identities", externalIdentityRouter); // #921
+app.use("/api/library", libraryRouter); // #784
+app.use("/api/provenance", provenanceRouter); // #753
+app.use("/api/marketplace", marketplaceRouter);
+app.use("/api/flags", featureFlagRouter);
+app.use("/api/support-cases", supportCaseRouter);
+app.use("/api/quality-checks", qualityCheckRouter);
+app.use("/api/recommendations/feedback", recommendationFeedbackRouter);
+app.use("/api/admin/operational-health", operationalHealthRouter);
+app.use("/api/maintenance", maintenanceBannerRouter); // Maintenance mode banners
+// Export routes for user-owned data (requires authentication)
+// Machine-readable API schema + interactive explorer (#713).
+app.use("/api/exports", exportRouter)
+app.get("/api/openapi.json", GetOpenApiSchema);
+app.use("/api/admin/dr", drRouter);
+app.use("/api/admin/policy-limits", policyLimitRouter);
+app.use("/api/recovery", operationRecoveryRouter);
+app.use("/api/receipts", receiptRouter);
+app.use("/api/admin/abuse-risk", abuseRiskRouter);
+app.use("/api/admin/retention-holds", retentionHoldRouter);
+app.use("/api/analytics/lifecycle", lifecycleCaptureRouter);
+app.use("/api/admin/lifecycle-analytics", lifecycleReportRouter);
+
+// Apply correlation ID middleware to all routes
+app.use(correlationMiddleware);
+
+// Apply standardized error handler middleware
+app.use(errorHandlerMiddleware);
 
 // Machine-readable API schema + interactive explorer (#713).
 app.get("/api/openapi.json", GetOpenApiSchema);
