@@ -61,9 +61,51 @@ Every fired signal records `observed`, `threshold` and a plain-language
   Use this to tune thresholds against real traffic first.
 - `enforce` – step-up / review / block are applied.
 
-Currently guarded: `POST /api/bundles/:id/purchase` (`bulk_purchase`). Wire
-other routes with `abuseRiskGuard({ operation, extract })` placed after rate
-limiting and before the handler.
+Currently guarded:
+
+| Route | Operation | Scoring subject |
+| --- | --- | --- |
+| `POST /api/bundles/:id/purchase` | `bulk_purchase` | buyer wallet |
+| `POST /api/prompts/transfers/request` | `ownership_transfer` | `fromWallet` (counterparty `toWallet`) |
+| `POST /api/prompts/transfers/:transferId/respond` | `ownership_transfer` | recipient `walletAddress` |
+| `POST /api/prompts/transfers/:transferId/cancel` | `ownership_transfer` | owner `walletAddress` |
+| `POST /api/provenance/bulk-import` | `bulk_import` | acting admin subject (`sub`) |
+
+Wire other routes with `abuseRiskGuard({ operation, extract })` placed after
+authorization/rate limiting and **before** `requireIdempotency`, so a blocked
+attempt never consumes an `Idempotency-Key` and a retry after approval/clear
+starts clean.
+
+## Explainable responses (#1046)
+
+Every non-allow response is self-explaining so support engineers can
+reconstruct a decision without server-side lookups:
+
+```jsonc
+{
+  "error": "This operation is held for review.",
+  "code": "REVIEW_REQUIRED",          // or STEP_UP_REQUIRED (403), OPERATION_BLOCKED (403)
+  "reviewId": "risk_…",               // present for review/block
+  "riskScore": 100,                   // 0..100 after impact weight and trust credit
+  "summary": "Decision review; signals: velocity_burst, ….",
+  "reasons": [
+    {
+      "code": "velocity_burst",
+      "explanation": "25 high-impact operations in 10 min (normal ≤ 8).",
+      "points": 40,                   // raw points before impact weight
+      "observed": 25,                 // what was measured
+      "threshold": 8,                 // what fired the signal
+      "critical": false               // only critical signals can justify a block
+    }
+  ],
+  "remedy": "…"                       // concrete next step for the caller
+}
+```
+
+The same fields (plus signal codes) are written to the structured log
+(`action: "abuseRisk"`) and to the `abuse_risk_decision` audit entry, whose
+persistence regression (schema enum silently dropping the action) is pinned
+by `server/src/tests/abuseRiskAuditPersistence.test.ts`.
 
 ## Operating the review queue
 

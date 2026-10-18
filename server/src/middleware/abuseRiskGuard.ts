@@ -8,6 +8,12 @@
  *              until an admin approves it (one-shot approval)
  *   block    → 403 OPERATION_BLOCKED
  *
+ * Every non-allow response is self-explaining: it carries `riskScore`, a
+ * plain-language `summary`, a `remedy` telling the caller what to do next,
+ * and per-signal `reasons` with code/points/observed/threshold/explanation,
+ * so a reviewer or support engineer can reconstruct the decision without
+ * server-side lookups (#1046).
+ *
  * Mode comes from ABUSE_RISK_MODE (`off` | `shadow` | `enforce`, default
  * `shadow`). In `shadow` every decision is logged but nothing is enforced;
  * flipping to `off` is the instant rollback. See docs/abuse-risk-detection.md.
@@ -21,6 +27,7 @@ import {
   HighImpactOperation,
   OperationContext,
   parseRiskMode,
+  RiskAssessment,
   RiskMode,
 } from "../services/abuseRiskScoring";
 import { hasFreshWalletSession } from "./walletSession";
@@ -45,6 +52,23 @@ function clientIp(req: Request): string | undefined {
   const forwarded = req.headers["x-forwarded-for"];
   const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(",")[0]?.trim();
   return first || req.socket?.remoteAddress || undefined;
+}
+
+/**
+ * Per-signal explanation payload returned to the client. Everything a
+ * reviewer needs to re-derive the decision: the raw points before impact
+ * weighting, the observed value vs the threshold that fired it, and whether
+ * the signal is critical (the only kind that can justify a block).
+ */
+export function explainReasons(assessment: RiskAssessment) {
+  return assessment.signals.map((s) => ({
+    code: s.code,
+    explanation: s.explanation,
+    points: s.points,
+    observed: s.observed,
+    threshold: s.threshold,
+    critical: s.critical,
+  }));
 }
 
 export function abuseRiskGuard(options: AbuseRiskGuardOptions) {
@@ -88,6 +112,7 @@ export function abuseRiskGuard(options: AbuseRiskGuardOptions) {
         enforced: outcome.action,
         score: assessment.score,
         signals: assessment.signals.map((s) => s.code),
+        summary: assessment.summary,
         reviewId: outcome.reviewId,
       });
       void recordAuditEvent({
@@ -120,8 +145,10 @@ export function abuseRiskGuard(options: AbuseRiskGuardOptions) {
           error: "Additional verification required for this operation.",
           code: "STEP_UP_REQUIRED",
           riskScore: assessment.score,
-          reasons: assessment.signals.map((s) => ({ code: s.code, explanation: s.explanation })),
-          remedy: "Sign a fresh wallet-session challenge (GET /api/wallet-session/challenge) and retry.",
+          summary: assessment.summary,
+          reasons: explainReasons(assessment),
+          remedy:
+            "Sign a fresh wallet-session challenge (GET /api/wallet-session/challenge) and retry.",
         });
         return;
       case "review":
@@ -130,7 +157,10 @@ export function abuseRiskGuard(options: AbuseRiskGuardOptions) {
           code: "REVIEW_REQUIRED",
           reviewId: outcome.reviewId,
           riskScore: assessment.score,
-          reasons: assessment.signals.map((s) => ({ code: s.code, explanation: s.explanation })),
+          summary: assessment.summary,
+          reasons: explainReasons(assessment),
+          remedy:
+            "An admin must resolve the review (GET /api/admin/abuse-risk/reviews); retry with the same Idempotency-Key after approval.",
         });
         return;
       case "block":
@@ -138,7 +168,11 @@ export function abuseRiskGuard(options: AbuseRiskGuardOptions) {
           error: "This operation was blocked by abuse protection.",
           code: "OPERATION_BLOCKED",
           reviewId: outcome.reviewId,
-          reasons: assessment.signals.map((s) => ({ code: s.code, explanation: s.explanation })),
+          riskScore: assessment.score,
+          summary: assessment.summary,
+          reasons: explainReasons(assessment),
+          remedy:
+            "This operation was rejected on corroborated risk evidence. An admin can reset the subject's counters (POST /api/admin/abuse-risk/subjects/reset) if this is a false positive.",
         });
         return;
     }
