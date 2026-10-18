@@ -18,6 +18,7 @@ import { handleAnalyticsAggregate } from "./handlers/analyticsAggregate";
 import { handleExportCsv } from "./handlers/exportCsv";
 import { handleStaleDisputeCleanup } from "./handlers/staleDisputeCleanup";
 import { handleRetentionCleanup } from "./handlers/retentionCleanup";
+import { handleStaleCacheRepair } from "./handlers/staleCacheRepair";
 
 type Handler = (job: JobRecordDTO) => Promise<void>;
 
@@ -28,6 +29,7 @@ const HANDLERS: Record<string, Handler> = {
   export_csv: handleExportCsv,
   stale_dispute_cleanup: handleStaleDisputeCleanup,
   retention_cleanup: handleRetentionCleanup,
+  stale_cache_repair: handleStaleCacheRepair,
 };
 
 export function getHandler(type: string): Handler | undefined {

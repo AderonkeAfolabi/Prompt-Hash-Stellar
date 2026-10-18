@@ -13,13 +13,14 @@ export type JobType =
   | "analytics_aggregate"
   | "export_csv"
   | "stale_dispute_cleanup"
-  | "retention_cleanup";
+  | "retention_cleanup"
+  | "stale_cache_repair";
 
 export type JobStatus = "pending" | "processing" | "completed" | "failed" | "dead_letter";
 
 const jobRecordSchema = new mongoose.Schema(
   {
-    type: { type: String, required: true, index: true, enum: ["settlement_poll", "entitlement_repair", "analytics_aggregate", "export_csv", "stale_dispute_cleanup", "retention_cleanup"] },
+    type: { type: String, required: true, index: true, enum: ["settlement_poll", "entitlement_repair", "analytics_aggregate", "export_csv", "stale_dispute_cleanup", "retention_cleanup", "stale_cache_repair"] },
     status: { type: String, required: true, index: true, enum: ["pending", "processing", "completed", "failed", "dead_letter"], default: "pending" },
     payload: { type: mongoose.Schema.Types.Mixed, required: true },
     payloadVersion: { type: Number, required: true, default: 1 },
