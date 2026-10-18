@@ -41,6 +41,7 @@ import { requireAdminScope } from "../middleware/adminAuth";
 import { reportLimiter, publishLimiter } from "../middleware/rateLimiter";
 import { enforcePolicyLimit } from "../middleware/policyLimitMiddleware";
 import { requireIdempotency } from "../middleware/idempotency";
+import { abuseRiskGuard } from "../middleware/abuseRiskGuard";
 
 export const promptRouter = express.Router();
 
@@ -170,10 +171,29 @@ promptRouter.get(
 // and the recipient approves or rejects it. Approval re-points the indexed
 // Prompt.owner (affects analytics/payout attribution). Both actions require a
 // wallet signature. See docs/architecture.md before extending this surface.
-promptRouter.post("/transfers/request", requireIdempotency, RequestOwnershipTransfer);
+//
+// Ownership transfer is a `fail-closed` high-impact operation (#1046): the
+// risk guard runs BEFORE idempotency so a blocked attempt never consumes an
+// Idempotency-Key, and self-dealing (from == to) / fresh-counterparty signals
+// can hold or step up the handoff.
+const transferRiskGuard = abuseRiskGuard({
+  operation: "ownership_transfer",
+  extract: (req) => {
+    // request: fromWallet is the actor; respond/cancel: walletAddress is the actor.
+    const wallet = req.body?.fromWallet ?? req.body?.walletAddress;
+    return typeof wallet === "string" && wallet
+      ? {
+          wallet,
+          target: req.params.transferId ? String(req.params.transferId) : req.body?.promptId,
+          counterparty: typeof req.body?.toWallet === "string" ? req.body.toWallet : undefined,
+        }
+      : null;
+  },
+});
+promptRouter.post("/transfers/request", transferRiskGuard, requireIdempotency, RequestOwnershipTransfer);
 promptRouter.get("/transfers/:walletAddress", GetOwnershipTransfers);
-promptRouter.post("/transfers/:transferId/respond", requireIdempotency, RespondOwnershipTransfer);
-promptRouter.post("/transfers/:transferId/cancel", requireIdempotency, CancelOwnershipTransfer);
+promptRouter.post("/transfers/:transferId/respond", transferRiskGuard, requireIdempotency, RespondOwnershipTransfer);
+promptRouter.post("/transfers/:transferId/cancel", transferRiskGuard, requireIdempotency, CancelOwnershipTransfer);
 
 // ── User Preference (non-authoritative, wallet-signature required) ────────────
 promptRouter.post("/buyer/save", SavePrompt);

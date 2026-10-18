@@ -76,33 +76,35 @@ export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
 export type AuditResult = "success" | "failure" | "blocked";
 
+/**
+ * Actions the schema historically accepted on top of `AUDIT_ACTIONS`. They are
+ * kept so existing rows and call sites (support access, notification prefs)
+ * never lose persistence, while `AUDIT_ACTIONS` stays the single typed
+ * contract. The schema enum below is the union of both — deriving it from
+ * `AUDIT_ACTIONS` is what guarantees a newly declared action can actually be
+ * persisted instead of being silently dropped by Mongoose validation
+ * (regression fixed for `abuse_risk_*` in #1046).
+ */
+const LEGACY_SCHEMA_ACTIONS = [
+  "notification_preference_updated",
+  "notification_mandatory_delivered",
+  "support_access_granted",
+  "support_access_revoked",
+  "support_access_used",
+  "support_access_denied",
+] as const;
+
+export const AUDIT_SCHEMA_ACTIONS: readonly string[] = [
+  ...AUDIT_ACTIONS,
+  ...LEGACY_SCHEMA_ACTIONS,
+];
+
 const auditLogSchema = new mongoose.Schema(
   {
     action: {
       type: String,
       required: true,
-      enum: [
-        "challenge_issued",
-        "challenge_rate_limited",
-        "unlock_success",
-        "unlock_invalid_signature",
-        "unlock_expired_challenge",
-        "unlock_no_access",
-        "unlock_integrity_failure",
-        "unlock_error",
-        "unlock_rate_limited",
-        "unlock_replay_detected",
-        "unlock_ledger_failure",
-        "unlock_stale_quote",
-        "admin_auth_success",
-        "admin_auth_denied",
-        "notification_preference_updated",
-        "notification_mandatory_delivered",
-        "support_access_granted",
-        "support_access_revoked",
-        "support_access_used",
-        "support_access_denied",
-      ] as AuditAction[],
+      enum: AUDIT_SCHEMA_ACTIONS,
       index: true,
     },
     result: {
