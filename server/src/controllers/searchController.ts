@@ -32,6 +32,26 @@ export interface SearchResponse {
 }
 
 /**
+ * Hard ceiling on `limit` for any search read path (#983).
+ *
+ * The route forwards `Number(req.query.limit)` straight through, so without
+ * this clamp `GET /api/search/prompts?limit=100000` asks Mongo for 100k
+ * documents in one response — and, because the deep-search policy only charges
+ * the pagination *offset* (`(page-1)*limit`), `page=1&limit=100000` costs 0
+ * and sails past the 500-offset ceiling. Clamping here (the single choke point
+ * every caller funnels through) bounds the work while staying inside the page
+ * size already documented for the marketplace and OpenAPI (`PAGE_SIZE_MAX`).
+ */
+export const SEARCH_PAGE_SIZE_MAX = 100;
+
+/** Clamp a caller-supplied page size into `[1, SEARCH_PAGE_SIZE_MAX]`. */
+export function clampSearchLimit(limit: number | undefined, fallback = 20): number {
+  const n = Number(limit);
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.min(Math.floor(n), SEARCH_PAGE_SIZE_MAX);
+}
+
+/**
  * Search prompts with advanced filtering (tags, version, creator trust) and pagination (#681)
  */
 export async function searchPrompts(
@@ -47,11 +67,15 @@ export async function searchPrompts(
     maxPrice = 1000000,
     sortBy = "recent",
     page = 1,
-    limit = 20,
+    limit: rawLimit = 20,
   } = filters;
 
+  // Worst-case request work is bounded regardless of what the caller sent.
+  const limit = clampSearchLimit(rawLimit);
+  const safePage = Number.isFinite(page) && page >= 1 ? Math.floor(page) : 1;
+
   const cacheKey = CACHE_KEYS.searchResults(
-    `q=${query}&cat=${category ?? ""}&tags=${Array.isArray(tags) ? tags.join(",") : (tags ?? "")}&ver=${version ?? ""}&minVer=${minVersion ?? ""}&minP=${minPrice}&maxP=${maxPrice}&sort=${sortBy}&p=${page}&l=${limit}&minR=${filters.minCreatorRating ?? ""}`,
+    `q=${query}&cat=${category ?? ""}&tags=${Array.isArray(tags) ? tags.join(",") : (tags ?? "")}&ver=${version ?? ""}&minVer=${minVersion ?? ""}&minP=${minPrice}&maxP=${maxPrice}&sort=${sortBy}&p=${safePage}&l=${limit}&minR=${filters.minCreatorRating ?? ""}`,
   );
   const cached = await cacheGetJson<SearchResponse>(cacheKey);
   if (cached) {
@@ -80,7 +104,7 @@ export async function searchPrompts(
       return {
         prompts: [],
         total: 0,
-        page,
+        page: safePage,
         totalPages: 0,
         hasMore: false,
       };
@@ -144,7 +168,7 @@ export async function searchPrompts(
   // Execute query with pagination
   let prompts = await searchQuery
     .sort(sortOptions)
-    .skip((page - 1) * limit)
+    .skip((safePage - 1) * limit)
     .limit(limit)
     .populate("owner", "walletAddress username rating")
     .lean();
@@ -158,12 +182,12 @@ export async function searchPrompts(
   }
 
   const totalPages = Math.ceil(total / limit);
-  const hasMore = page < totalPages;
+  const hasMore = safePage < totalPages;
 
   const result: SearchResponse = {
     prompts,
     total,
-    page,
+    page: safePage,
     totalPages,
     hasMore,
   };
@@ -225,8 +249,12 @@ export async function getSearchSuggestions(query: string, limit: number = 5) {
     return { titles: [], categories: [], tags: [] };
   }
 
+  // Suggestions are an autocomplete path: they fire on every keystroke, so the
+  // per-request work stays tightly bounded (#983).
+  const safeLimit = clampSearchLimit(limit, 5);
+
   const normalized = query.trim().toLowerCase();
-  const cacheKey = CACHE_KEYS.searchSuggestions(`${normalized}:${limit}`);
+  const cacheKey = CACHE_KEYS.searchSuggestions(`${normalized}:${safeLimit}`);
   const cached = await cacheGetJson<{ titles: string[]; categories: string[] }>(cacheKey);
   if (cached) {
     return cached;
@@ -237,10 +265,10 @@ export async function getSearchSuggestions(query: string, limit: number = 5) {
   const [titles, categories] = await Promise.all([
     Prompt.find({ title: searchRegex, isActive: true })
       .select("title")
-      .limit(limit)
+      .limit(safeLimit)
       .lean(),
     Prompt.distinct("category", { category: searchRegex, isActive: true }).then(
-      (cats: string[]) => cats.slice(0, limit),
+      (cats: string[]) => cats.slice(0, safeLimit),
     ),
   ]);
 
@@ -284,7 +312,9 @@ export async function getCategoriesWithCounts() {
  * Get featured/top prompts
  */
 export async function getFeaturedPrompts(limit: number = 6) {
-  const cacheKey = CACHE_KEYS.featuredPrompts(limit);
+  // Bounded like the rest of the read paths (#983).
+  const safeLimit = clampSearchLimit(limit, 6);
+  const cacheKey = CACHE_KEYS.featuredPrompts(safeLimit);
   const cached = await cacheGetJson<any[]>(cacheKey);
   if (cached) {
     return cached;
@@ -295,7 +325,7 @@ export async function getFeaturedPrompts(limit: number = 6) {
     listingStatus: "published",
   })
     .sort({ salesCount: -1, rating: -1 })
-    .limit(limit)
+    .limit(safeLimit)
     .populate("owner", "walletAddress username rating")
     .lean();
 

@@ -14,8 +14,9 @@ applied.
 3. [Planned: operator-level global volume cap](#3-planned-operator-level-global-volume-cap)
 4. [Server-side expensive-operation quotas](#4-server-side-expensive-operation-quotas)
 5. [HTTP-layer rate limiters](#5-http-layer-rate-limiters)
-6. [Getter reference](#6-getter-reference)
-7. [Wave-change note](#7-wave-change-note)
+6. [Read-path resource budgets (worst-case work per request)](#6-read-path-resource-budgets-worst-case-work-per-request)
+7. [Getter reference](#7-getter-reference)
+8. [Wave-change note](#8-wave-change-note)
 
 ---
 
@@ -246,7 +247,74 @@ Blocked events are stored in a ring buffer of 500 entries and accessible via
 
 ---
 
-## 6. Getter reference
+## 6. Read-path resource budgets (worst-case work per request)
+
+Sections 1–5 bound **writes and rates**. This section bounds **how much work a
+single read request can cause**, so a hostile or buggy client cannot turn one
+HTTP call into an unbounded Mongo scan. Every ceiling here is a named exported
+constant, enforced at the *service* choke point that every caller funnels
+through, so tightening or relaxing a budget is an explicit, reviewable diff.
+
+The invariants are enforced by
+`server/src/tests/resourceBudget.test.ts` (28 tests, no wall-clock assertions —
+they assert **call counts and `.limit()` arguments**, which are deterministic in
+CI):
+
+| Workload | Ceiling | Constant / where | Test |
+|----------|---------|------------------|------|
+| Search page size | `limit` clamped to ≤ 100 | `SEARCH_PAGE_SIZE_MAX` in `searchController.ts` | "never passes an unclamped caller limit" |
+| Search count | ≤ 1 `countDocuments` per request | (structural) | "issues at most ONE countDocuments" |
+| Autocomplete | `limit` clamped to ≤ 100 | `clampSearchLimit` | "clamps autocomplete suggestions" |
+| Featured prompts | `limit` clamped to ≤ 100 | `clampSearchLimit` | "clamps featured prompts" |
+| Timeline page size | `limit` clamped to ≤ 100 (+1 probe row) | `TIMELINE_PAGE_SIZE_MAX` in `timelineService.ts` | "never asks Mongo for more than the ceiling" |
+| Admin payout summary | ≤ 2 entry scans per creator + 1 `distinct` | `getAdminPayoutSummaryView` | "bounds the admin summary to 2 queries per creator" |
+| Ledger export | ≤ `LEDGER_SCAN_MAX_ENTRIES` (50 000) rows | `payoutLedgerService.ts` | "applies a limit to the export scan" |
+| Deep-search offset | 500 records, 413 past it | `INDEXING_DEEP_SEARCH` | "rejects a deep-search offset one past the ceiling" |
+| Bulk import size | 50 items, rejected past it | `STORAGE_BULK_IMPORT` | "caps a bulk import at STORAGE_BULK_IMPORT items" |
+
+### Why the search clamp is a contract restoration, not a break
+
+`GET /api/search/prompts?limit=100000` previously forwarded `Number(limit)`
+straight into `.limit()`, asking Mongo for 100 000 documents. Worse, the
+deep-search policy only charged the pagination **offset** (`(page-1)*limit`), so
+`page=1&limit=100000` cost **0** and sailed past the 500-record ceiling — a
+single request could pull the whole catalog for free. Clamping to 100 (the same
+`PAGE_SIZE_MAX` the marketplace controller already uses) bounds the work and
+restores the documented behaviour; legitimate callers asking for ≤ 100 see no
+change.
+
+### Truncation is reported, never silent
+
+A ledger export that hits `LEDGER_SCAN_MAX_ENTRIES` sets
+`truncated: true` and `scanLimit` in the JSON body, and the CSV path returns
+`X-Ledger-Export-Truncated: true` / `X-Ledger-Export-Scan-Limit` headers. The
+legacy `exportLedgerReport()` signature (returns rows only) is preserved for
+existing callers; only the admin route uses the bounded variant so an accountant
+can never receive a silently-partial file.
+
+### Operational edge cases
+
+- **Cache keys now encode the clamped limit.** A request for `limit=100000`
+  previously cached under `l=100000`; it now caches under `l=100`. Old entries
+  simply expire — no flush needed.
+- **The 2-scans-per-creator admin summary is still O(N) in creators.** A
+  ledger with 100 000 distinct creators still issues 200 001 queries. This
+  budget stops it from being 3·N+1 and bounds each scan, but the remaining
+  per-creator fan-out is the next candidate for a `$lookup` aggregation. It is
+  an **admin-only** endpoint (`payouts:read`), not user-reachable.
+- **Raising a ceiling** means editing the constant and the matching test
+  assertion in the same PR. The tests will fail if you change one without the
+  other — that is deliberate.
+
+### Rollback
+
+All changes in this section are server-side and additive. To roll back a
+budget, revert the constant (or the whole commit); there is no schema or data
+migration, and no on-chain component is involved.
+
+---
+
+## 7. Getter reference
 
 This table answers "which call do I make to read a given cap value at runtime?"
 
@@ -263,12 +331,15 @@ This table answers "which call do I make to read a given cap value at runtime?"
 | Referral percentage | On-chain | `get_referral_percentage() -> u32` |
 | Global volume cap *(planned)* | On-chain | `get_global_volume_cap() -> u64` — **not yet implemented** |
 | Full operator config *(planned)* | On-chain | `get_contract_config() -> ContractConfig` — **not yet implemented** |
+| Search page-size ceiling | Server | `SEARCH_PAGE_SIZE_MAX` (import from `searchController.ts`) |
+| Timeline page-size ceiling | Server | `TIMELINE_PAGE_SIZE_MAX` (import from `timelineService.ts`) |
+| Ledger export scan ceiling | Server | `LEDGER_SCAN_MAX_ENTRIES` (import from `payoutLedgerService.ts`) |
 | Policy quota status | Server | `policyLimitService.getStatus()` |
 | Active rate-limit blocks | Server | `getBlockedRateLimitEvents()` |
 
 ---
 
-## 7. Wave-change note
+## 8. Wave-change note
 
 The term **wave** in this repository refers to a PR batch name
 (`STELLAR_WAVE_IMPROVEMENTS.md`) covering issues #801, #809, #810, and #811

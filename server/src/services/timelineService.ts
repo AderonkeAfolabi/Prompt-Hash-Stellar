@@ -12,6 +12,21 @@ import { minimizeOperationalMetadata } from "./operationalMetadata";
 
 type TimelineCursor = { createdAt: string; id: string };
 
+/**
+ * Hard ceiling on timeline page size (#983). The controllers forward
+ * `parseInt(req.query.limit) || 20` straight through, so without this a
+ * caller could ask for `.limit(1000001)` and pull a user's entire event
+ * history in one response. Keeps the documented default of 20 for normal use.
+ */
+export const TIMELINE_PAGE_SIZE_MAX = 100;
+
+/** Clamp a caller-supplied timeline page size into `[1, TIMELINE_PAGE_SIZE_MAX]`. */
+export function clampTimelineLimit(limit: number | undefined, fallback = 20): number {
+  const n = Number(limit);
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.min(Math.floor(n), TIMELINE_PAGE_SIZE_MAX);
+}
+
 function encodeCursor(event: { createdAt: Date; _id: unknown }): string {
   return Buffer.from(
     JSON.stringify({ createdAt: event.createdAt.toISOString(), id: String(event._id) }),
@@ -79,11 +94,14 @@ export class TimelineService {
   }) {
     const {
       wallet,
-      limit = 20,
+      limit: rawLimit = 20,
       cursor,
       includeMaintainer = false,
       eventTypes,
     } = params;
+
+    // Worst-case page work stays bounded no matter what the caller sent.
+    const limit = clampTimelineLimit(rawLimit);
 
     const visibilityFilter: TimelineVisibility[] = ["public"];
     if (includeMaintainer) {
