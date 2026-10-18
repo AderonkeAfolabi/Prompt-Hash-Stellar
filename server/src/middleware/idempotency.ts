@@ -47,14 +47,23 @@ export function requireIdempotency(req: Request, res: Response, next: NextFuncti
       }
 
       let responseBody: unknown = null;
+      let capturedJson = false;
       const originalJson = res.json.bind(res);
       const originalSend = res.send.bind(res);
       res.json = ((body: unknown) => {
         responseBody = body;
+        capturedJson = true;
         return originalJson(body);
       }) as Response["json"];
       res.send = ((body?: unknown) => {
-        responseBody = body ?? null;
+        // `res.json()` delegates to `res.send()` with the ALREADY-STRINGIFIED
+        // payload. Without this guard the send wrapper overwrites the object
+        // captured by json, and every replay double-encodes the stored body —
+        // the client then receives a JSON string instead of the original
+        // response object (#1041).
+        if (!capturedJson) {
+          responseBody = body ?? null;
+        }
         return originalSend(body);
       }) as Response["send"];
       res.once("finish", () => {
