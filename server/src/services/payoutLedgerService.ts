@@ -1,5 +1,21 @@
 import { LedgerEntry, LedgerEntryType, ILedgerEntry } from "../models/LedgerEntry";
 
+/**
+ * Upper bound on rows materialised by a single ledger export or balance scan
+ * (#983). `GET /api/payouts/admin/export` with no `creatorAddress` used to
+ * `find()` the ENTIRE collection into memory before serialising it, so a
+ * high-cardinality ledger could OOM the process on one admin request. Callers
+ * needing the full history should page by date range rather than widening this.
+ */
+export const LEDGER_SCAN_MAX_ENTRIES = 50_000;
+
+/** Clamp a caller/page-derived scan size into `(0, LEDGER_SCAN_MAX_ENTRIES]`. */
+export function clampLedgerScanSize(limit: number | undefined): number {
+  const n = Number(limit);
+  if (!Number.isFinite(n) || n < 1) return LEDGER_SCAN_MAX_ENTRIES;
+  return Math.min(Math.floor(n), LEDGER_SCAN_MAX_ENTRIES);
+}
+
 export interface CreateLedgerEntryInput {
   entryType: LedgerEntryType;
   creatorAddress: string;
@@ -131,13 +147,20 @@ export async function recalculateCreatorBalance(creatorAddress: string): Promise
 
 /**
  * Reconcile ledger state with Stellar transaction references and detect drift.
+ *
+ * `precomputedSummary` lets a caller that already ran `recalculateCreatorBalance`
+ * for this creator avoid a second full scan of their entries — the admin
+ * summary view computes both back to back, so without it every creator costs
+ * an extra unbounded `find()` (#983). Omitting it preserves the original
+ * behaviour exactly.
  */
 export async function reconcileCreatorLedger(
   creatorAddress: string,
   stellarTxRecords?: Array<{ txHash: string; amount: number; type: string }>,
+  precomputedSummary?: CreatorBalanceSummary,
 ): Promise<ReconciliationReport> {
   const normalizedAddress = creatorAddress.toLowerCase();
-  const summary = await recalculateCreatorBalance(normalizedAddress);
+  const summary = precomputedSummary ?? await recalculateCreatorBalance(normalizedAddress);
   const entries = await LedgerEntry.find({ creatorAddress: normalizedAddress }).lean();
 
   let unsettledCount = 0;
@@ -222,6 +245,12 @@ export async function getCreatorPayoutSummaryView(creatorAddress: string) {
 
 /**
  * Admin payout summary view across creators.
+ *
+ * Per creator this runs exactly two entry scans — one for the balance summary,
+ * one for reconciliation — instead of the three it used to run (the
+ * reconciliation path recomputed a summary that had just been computed). The
+ * ceiling is 2N+1 model calls for N creators and is enforced by
+ * `server/src/tests/resourceBudget.test.ts` (#983).
  */
 export async function getAdminPayoutSummaryView() {
   const creators = await LedgerEntry.distinct("creatorAddress");
@@ -229,7 +258,7 @@ export async function getAdminPayoutSummaryView() {
 
   for (const creator of creators) {
     const summary = await recalculateCreatorBalance(creator);
-    const reconciliation = await reconcileCreatorLedger(creator);
+    const reconciliation = await reconcileCreatorLedger(creator, undefined, summary);
     reports.push({
       creatorAddress: creator,
       summary,
@@ -249,21 +278,54 @@ export async function getAdminPayoutSummaryView() {
 
 /**
  * Export-ready data shape for accounting review.
+ *
+ * `exportLedgerReport` keeps its original signature (returns rows only). The
+ * bounded variant additionally reports whether the scan hit
+ * `LEDGER_SCAN_MAX_ENTRIES`, so callers can surface truncation instead of
+ * silently handing accounting an incomplete file (#983).
  */
 export async function exportLedgerReport(creatorAddress?: string): Promise<AccountingExportRow[]> {
-  const query = creatorAddress ? { creatorAddress: creatorAddress.toLowerCase() } : {};
-  const entries = await LedgerEntry.find(query).sort({ createdAt: 1 }).lean();
+  const { rows } = await exportLedgerReportBounded(creatorAddress);
+  return rows;
+}
 
-  return entries.map((e) => ({
-    entryId: String(e._id),
-    createdAt: new Date(e.createdAt).toISOString(),
-    creatorAddress: e.creatorAddress,
-    entryType: e.entryType,
-    promptId: e.promptId || "",
-    amount: e.amount,
-    currency: e.currency,
-    stellarTxRef: e.stellarTxRef || "",
-    referenceId: e.referenceId,
-    description: e.description,
-  }));
+export interface BoundedLedgerExport {
+  rows: AccountingExportRow[];
+  /** True when the scan stopped at the ceiling and older rows were omitted. */
+  truncated: boolean;
+  /** The ceiling that was applied to this scan. */
+  scanLimit: number;
+}
+
+export async function exportLedgerReportBounded(
+  creatorAddress?: string,
+  scanLimit: number = LEDGER_SCAN_MAX_ENTRIES,
+): Promise<BoundedLedgerExport> {
+  const query = creatorAddress ? { creatorAddress: creatorAddress.toLowerCase() } : {};
+  const limit = clampLedgerScanSize(scanLimit);
+
+  // Read one extra row purely to detect truncation without a second count query.
+  const entries = await LedgerEntry.find(query)
+    .sort({ createdAt: 1 })
+    .limit(limit + 1)
+    .lean();
+  const truncated = entries.length > limit;
+  const page = truncated ? entries.slice(0, limit) : entries;
+
+  return {
+    truncated,
+    scanLimit: limit,
+    rows: page.map((e) => ({
+      entryId: String(e._id),
+      createdAt: new Date(e.createdAt).toISOString(),
+      creatorAddress: e.creatorAddress,
+      entryType: e.entryType,
+      promptId: e.promptId || "",
+      amount: e.amount,
+      currency: e.currency,
+      stellarTxRef: e.stellarTxRef || "",
+      referenceId: e.referenceId,
+      description: e.description,
+    })),
+  };
 }

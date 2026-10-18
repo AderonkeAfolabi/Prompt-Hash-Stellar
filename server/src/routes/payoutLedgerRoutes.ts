@@ -6,7 +6,7 @@ import {
   recordLedgerEntry,
   getCreatorPayoutSummaryView,
   getAdminPayoutSummaryView,
-  exportLedgerReport,
+  exportLedgerReportBounded,
 } from "../services/payoutLedgerService";
 import { buildCsv, contentDispositionValue } from "../services/sensitiveContent";
 
@@ -72,7 +72,16 @@ payoutLedgerRouter.get(
       await connectDb();
       const creatorAddress = req.query.creatorAddress as string | undefined;
       const format = (req.query.format as string) || "json";
-      const rows = await exportLedgerReport(creatorAddress);
+      const { rows, truncated, scanLimit } = await exportLedgerReportBounded(creatorAddress);
+
+      // Truncation must be visible to accounting, never silent (#983).
+      if (truncated) {
+        console.warn("Ledger export hit the scan ceiling", {
+          action: "ledgerExportTruncated",
+          scanLimit,
+          creatorAddress: creatorAddress ?? "all",
+        });
+      }
 
       if (format === "csv") {
         const headers = ["entryId", "createdAt", "creatorAddress", "entryType", "promptId", "amount", "currency", "stellarTxRef", "referenceId", "description"];
@@ -98,12 +107,17 @@ payoutLedgerRouter.get(
           "Content-Disposition",
           contentDispositionValue(`ledger_export_${Date.now()}.csv`, "ledger_export.csv"),
         );
+        // Header carries truncation so an operator piping the CSV can tell.
+        res.setHeader("X-Ledger-Export-Truncated", truncated ? "true" : "false");
+        res.setHeader("X-Ledger-Export-Scan-Limit", String(scanLimit));
         return res.send(csv);
       }
 
       return res.json({
         success: true,
         total: rows.length,
+        truncated,
+        scanLimit,
         rows,
       });
     } catch (err: any) {
