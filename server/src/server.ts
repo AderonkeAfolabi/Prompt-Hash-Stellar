@@ -21,6 +21,9 @@ import { supportCaseRouter } from "./routes/supportCaseRoutes.js";
 import { qualityCheckRouter } from "./routes/qualityCheckRoutes.js";
 import { recommendationFeedbackRouter } from "./routes/recommendationFeedbackRoutes.js";
 import { operationalHealthRouter } from "./routes/operationalHealthRoutes.js";
+import { staleCacheRouter } from "./routes/staleCacheRoutes.js";
+import { trendAnalyticsRouter } from "./routes/trendAnalyticsRoutes.js";
+import { dependencyHealthRouter } from "./routes/dependencyHealthRoutes.js";
 import { drRouter } from "./routes/drRoutes.js";
 import { exportRouter } from "./routes/exportRoutes";
 import { policyLimitRouter } from "./routes/policyLimitRoutes";
@@ -84,6 +87,9 @@ app.use("/api/support-cases", supportCaseRouter);
 app.use("/api/quality-checks", qualityCheckRouter);
 app.use("/api/recommendations/feedback", recommendationFeedbackRouter);
 app.use("/api/admin/operational-health", operationalHealthRouter);
+app.use("/api/stale-cache", staleCacheRouter);
+app.use("/api/admin/trend-analytics", trendAnalyticsRouter);
+app.use("/api/admin/dependency-health", dependencyHealthRouter);
 app.use("/api/maintenance", maintenanceBannerRouter); // Maintenance mode banners
 // Export routes for user-owned data (requires authentication)
 // Machine-readable API schema + interactive explorer (#713).

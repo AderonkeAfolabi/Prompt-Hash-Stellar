@@ -54,6 +54,14 @@ export interface ArchivedExportPayload extends BaseJobPayload {
   archived: true;
 }
 
+export interface StaleCacheRepairPayload extends BaseJobPayload {
+  version: 1;
+  dryRun?: boolean;
+  promptId?: string;
+  sourceVersion?: string | number;
+  maxEntries?: number;
+}
+
 export type JobPayload =
   | SettlementPollPayload
   | EntitlementRepairPayload
@@ -61,7 +69,8 @@ export type JobPayload =
   | ExportCsvPayload
   | StaleDisputeCleanupPayload
   | RetentionCleanupPayload
-  | ArchivedExportPayload;
+  | ArchivedExportPayload
+  | StaleCacheRepairPayload;
 
 export type JobType =
   | "settlement_poll"
@@ -69,7 +78,8 @@ export type JobType =
   | "analytics_aggregate"
   | "export_csv"
   | "stale_dispute_cleanup"
-  | "retention_cleanup";
+  | "retention_cleanup"
+  | "stale_cache_repair";
 
 export interface EnqueueOptions {
   maxAttempts?: number;
