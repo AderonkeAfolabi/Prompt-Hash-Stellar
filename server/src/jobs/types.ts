@@ -86,6 +86,12 @@ export interface EnqueueOptions {
   delayMs?: number;
   dedupeKey?: string;
   dedupeWindowMs?: number;
+  /**
+   * Per-enqueue admission ceiling for this job type (pending + processing).
+   * Defaults to the type's configured limit; see jobQueue.ts. Useful for
+   * tests and for callers with a tighter budget than the global default.
+   */
+  maxPending?: number;
 }
 
 export interface JobRecordDTO {

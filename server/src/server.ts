@@ -32,6 +32,7 @@ import { operationRecoveryRouter } from "./routes/operationRecoveryRoutes";
 import { receiptRouter } from "./routes/receiptRoutes";
 import { maintenanceBannerRouter } from "./routes/maintenanceBannerRoutes";
 import { externalIdentityRouter } from "./routes/externalIdentityRoutes";
+import { externalEvidenceRouter } from "./routes/externalEvidenceRoutes"; // #1011
 import { abuseRiskRouter } from "./routes/abuseRiskRoutes";
 import { retentionHoldRouter } from "./routes/retentionHoldRoutes";
 import { lifecycleCaptureRouter, lifecycleReportRouter } from "./routes/lifecycleAnalyticsRoutes";
@@ -41,6 +42,7 @@ import { payoutLedgerRouter } from "./routes/payoutLedgerRoutes";
 import { entitlementRouter } from "./routes/entitlementRoutes";
 import { bundleRouter } from "./routes/bundleRoutes";
 import { healthRouter } from "./routes/healthRoutes";
+import { jobRouter } from "./routes/jobRoutes";
 import { allowListRouter } from "./routes/allowListRoutes";
 import { projectionReplayRouter } from "./routes/projectionReplayRoutes";
 import {
@@ -70,6 +72,7 @@ const port = 5000;
 app.use(express.json());
 
 app.use("/api/health", healthRouter); // #1027 dependency-aware public health
+app.use("/api/jobs", jobRouter); // #1009 queue observability + backpressure
 app.use("/api/improve-proxy", proxyrouter);
 app.use("/api/prompts", promptRouter);
 app.use("/api/user", userRouter);
@@ -84,6 +87,7 @@ app.use("/api/notifications", notificationRouter);
 app.use("/api/audit", auditRouter); // #783
 app.use("/api/wallet-session", walletSessionRouter); // #753, #784
 app.use("/api/external-identities", externalIdentityRouter); // #921
+app.use("/api/external-evidence", externalEvidenceRouter); // #1011
 app.use("/api/library", libraryRouter); // #784
 app.use("/api/provenance", provenanceRouter); // #753
 app.use("/api/marketplace", marketplaceRouter);
