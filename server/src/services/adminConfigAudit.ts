@@ -30,7 +30,7 @@ import { logger, recordAuditEvent, sanitizeAuditState } from "./auditTrail";
 export const ADMIN_CONFIG_TARGET_TYPE = "admin_config";
 
 export type AdminConfigType = "feature_flag";
-export type AdminConfigOperation = "create" | "update" | "delete";
+export type AdminConfigOperation = "create" | "update" | "delete" | "emergency_disable";
 
 type ConfigState = Record<string, unknown>;
 
@@ -55,6 +55,13 @@ export interface AuditedConfigChange<T> {
   clientIp?: string | null;
   /** Caller-supplied id (e.g. Idempotency-Key) so retries share one id. */
   changeId?: string | null;
+  /**
+   * When false, a change whose evidence cannot be recorded is KEPT (and the
+   * gap logged) instead of rolled back. Only for safety switches such as an
+   * emergency disable, where blocking the change is worse than missing
+   * evidence. Defaults to true.
+   */
+  requireEvidence?: boolean;
   /** Reads the current state; `null` when the config does not exist. */
   load: () => Promise<T | null>;
   /** Applies the change and returns the resulting state (`null` once deleted). */
@@ -70,6 +77,8 @@ export interface AuditedConfigResult<T> {
   changeId: string;
   changedFields: string[];
   noop: boolean;
+  /** False only when `requireEvidence: false` and the record failed. */
+  auditRecorded: boolean;
 }
 
 function stableJson(value: unknown): string {
@@ -152,6 +161,19 @@ export async function applyAuditedConfigChange<T>(
       { throwOnError: true },
     );
   } catch (auditErr) {
+    if (change.requireEvidence === false) {
+      logger.error("admin config: change applied WITHOUT audit evidence (requireEvidence=false)", {
+        action: "admin_config_change",
+        target,
+        changeId,
+        operation: change.operation,
+        actor: change.actor,
+        beforeState,
+        afterState,
+        err: auditErr instanceof Error ? auditErr.message : String(auditErr),
+      });
+      return { value: after, changeId, changedFields, noop, auditRecorded: false };
+    }
     // No evidence, no change: put the config back the way we found it.
     let rolledBack = noop;
     if (!noop) {
@@ -180,7 +202,7 @@ export async function applyAuditedConfigChange<T>(
     );
   }
 
-  return { value: after, changeId, changedFields, noop };
+  return { value: after, changeId, changedFields, noop, auditRecorded: true };
 }
 
 export interface ConfigChangeEvidence {

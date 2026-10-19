@@ -379,3 +379,9 @@ export function validateQuoteForPurchase(
     quote,
   };
 }
+
+export function xlmToStroopsBigInt(xlm: number | string): bigint {
+  const num = typeof xlm === 'string' ? parseFloat(xlm) : xlm;
+  if (isNaN(num)) return 0n;
+  return BigInt(Math.round(num * 10000000));
+}

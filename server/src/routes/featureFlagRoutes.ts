@@ -9,6 +9,7 @@ import {
   applyAuditedConfigChange,
   AuditEvidenceUnavailableError,
 } from "../services/adminConfigAudit.js";
+import { verifyRollback } from "../services/flagRolloutGuard.js";
 
 export const featureFlagRouter = express.Router();
 
@@ -142,6 +143,63 @@ featureFlagRouter.patch(
       });
       res.setHeader("X-Config-Change-Id", result.changeId);
       return res.json(result.value);
+    } catch (err: any) {
+      return sendChangeError(res, err, 400);
+    }
+  }
+);
+
+// Issue #1043: a one-call kill switch. The pure rollout-guard logic in
+// flagRolloutGuard.ts already existed but was never wired to anything —
+// disabling a flag still required a human to PATCH every environment by
+// hand mid-incident. This forces `disabled` globally and in every known
+// environment in one request, then runs `verifyRollback` so the response
+// says plainly whether the disable actually took. Domain checks this
+// route can't itself observe (indexer/outbox/ledger drift) are accepted
+// as caller-supplied evidence, defaulting to "pass" when omitted — wiring
+// those to the real indexer/ledger services is follow-up work, not part
+// of this flag-service-local slice.
+featureFlagRouter.post(
+  "/:name/emergency-disable",
+  requireAdminScope("flags:write"),
+  async (req: AdminRequest, res: Response) => {
+    const name = String(req.params.name);
+    try {
+      const { reason, noPartialWrites, invariantsPass, noLedgerDrift } = req.body ?? {};
+      // Audited like any config change (#1026), but a kill switch must not be
+      // blocked by an audit-store outage: evidence is best effort here.
+      const result = await applyAuditedConfigChange({
+        ...auditContext(req),
+        configType: "feature_flag",
+        configKey: name.toLowerCase(),
+        operation: "emergency_disable",
+        requireEvidence: false,
+        load: () => featureFlagService.getFlag(name),
+        apply: () =>
+          featureFlagService.updateFlag(name, {
+            status: "disabled",
+            environments: { development: false, staging: false, production: false },
+          }),
+        restore: (before) =>
+          featureFlagService.restoreFlag(name, before ? snapshotFlag(before) : null),
+        snapshot: snapshotFlag,
+      });
+      const flag = result.value;
+
+      const verification = verifyRollback({
+        flagDisabledEverywhere: flag?.status === "disabled",
+        noPartialWrites: noPartialWrites ?? true,
+        invariantsPass: invariantsPass ?? true,
+        noLedgerDrift: noLedgerDrift ?? true,
+      });
+
+      res.setHeader("X-Config-Change-Id", result.changeId);
+      return res.json({
+        flag,
+        reason: reason ?? null,
+        verification,
+        auditRecorded: result.auditRecorded,
+      });
     } catch (err: any) {
       return sendChangeError(res, err, 400);
     }

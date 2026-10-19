@@ -20,12 +20,14 @@
     "reindex": "ts-node scripts/reIndexFromLedger.ts",
     "reindex:dry-run": "ts-node scripts/reIndexFromLedger.ts --dry-run",
     "projections:replay": "ts-node scripts/replayProjection.ts",
+    "backfill": "ts-node scripts/backfillTool.ts",
     "seed:preview": "node scripts/seedPreview.mjs",
     "db:migrate": "ts-node src/db/migrateCli.ts up",
     "db:rollback": "ts-node src/db/rollbackCli.ts",
     "retention:enqueue": "ts-node scripts/enqueueRetentionCleanup.ts",
     "repair:entitlement": "ts-node scripts/repairEntitlement.ts",
-    "data:integrity:monitor": "ts-node scripts/dataIntegrityMonitor.ts"
+    "data:integrity:monitor": "ts-node scripts/dataIntegrityMonitor.ts",
+    "monitor:synthetic": "ts-node scripts/runSyntheticJourney.ts"
   },
   "files": [
     "build"

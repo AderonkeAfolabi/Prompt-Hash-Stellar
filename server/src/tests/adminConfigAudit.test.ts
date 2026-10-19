@@ -220,6 +220,35 @@ describe("feature flag changes leave audit evidence (#1026)", () => {
     expect(evidence.body.records[1].changedFields).toEqual(["status"]);
   });
 
+  it("emergency disable is audited, and an audit outage does not block the kill switch", async () => {
+    if (!dbReady) return;
+    expect(
+      (await createFlag(WRITER, { status: "enabled", environments: { production: true } })).status,
+    ).toBe(200);
+
+    const disable = () =>
+      jsonCall(http.baseUrl, "/api/flags/strict_settlement_checks/emergency-disable", {
+        method: "POST",
+        headers: WRITER,
+        body: JSON.stringify({ reason: "INC-7 settlement drift" }),
+      });
+
+    const first = await disable();
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ auditRecorded: true, reason: "INC-7 settlement drift" });
+    expect(first.body.flag.status).toBe("disabled");
+    const record: any = await AuditLog.findOne({ "metadata.operation": "emergency_disable" }).lean();
+    expect(record.afterState.environments).toEqual({ development: false, staging: false, production: false });
+
+    // Re-enable, then disable during an audit outage: the change must stick.
+    await FeatureFlag.updateOne({ name: "strict_settlement_checks" }, { $set: { status: "enabled" } });
+    vi.spyOn(AuditLog, "create").mockRejectedValue(new Error("audit store offline"));
+    const second = await disable();
+    expect(second.status).toBe(200);
+    expect(second.body.auditRecorded).toBe(false);
+    expect((await FeatureFlag.findOne({ name: "strict_settlement_checks" }).lean()).status).toBe("disabled");
+  });
+
   it("authorization path: callers without flags:write cannot change config and leave no change record", async () => {
     if (!dbReady) return;
 
