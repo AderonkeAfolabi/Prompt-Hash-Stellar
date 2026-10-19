@@ -41,11 +41,11 @@ npx ts-node server/scripts/validateRestoreInvariants.ts --json
 
 **Expected Healthy Output**:
 ```
-==================================================================
+------------------------------------------------------------------
   PROMPT HASH STELLAR - DISASTER RECOVERY INVARIANT VALIDATION
   Timestamp: 2026-09-27T02:00:00.000Z
   Overall Status: [ PASSED ]
-==================================================================
+------------------------------------------------------------------
 
 SUMMARY:
   • Invariants Evaluated:   6
@@ -59,7 +59,7 @@ SUMMARY:
 [ PASS ] INV_04: Bundle Composition & Pricing Invariants
 [ PASS ] INV_05: On-Chain Transaction Reference Uniqueness
 [ PASS ] INV_06: Auxiliary & Orphaned Record Detection
-==================================================================
+------------------------------------------------------------------
 [✓] All core domain invariants verified. Database is ready for traffic.
 ```
 
