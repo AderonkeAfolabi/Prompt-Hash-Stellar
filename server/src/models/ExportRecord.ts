@@ -3,8 +3,8 @@ import mongoose, { Document, Schema } from "mongoose";
 export interface IExportRecord extends Document {
   userId: string; // the user who owns the exported data
   promptIds: string[]; // exported prompt IDs
-  scope: "PROMPT" | "HISTORY" | "FULL";
-  status: "pending" | "completed" | "failed" | "expired";
+  scope: "prompt" | "history" | "full";
+  status: "pending" | "completed" | "failed" | "expired" | "cancelled";
   fileUrl?: string; // signed URL where export can be downloaded
   integrityChecksum?: string;
   generatedAt: Date;
@@ -32,7 +32,7 @@ export const EXPORT_SCOPES = {
   FULL: "full", // Prompts + full history + metadata
 } as const;
 
-export type ExportScope = keyof typeof EXPORT_SCOPES;
+export type ExportScope = (typeof EXPORT_SCOPES)[keyof typeof EXPORT_SCOPES];
 
 /**
  * Export retention configuration.
@@ -59,7 +59,7 @@ const exportSchema = new Schema(
     },
     status: {
       type: String,
-      enum: ["pending", "completed", "failed", "expired"],
+      enum: ["pending", "completed", "failed", "expired", "cancelled"],
       default: "pending",
     },
     fileUrl: {

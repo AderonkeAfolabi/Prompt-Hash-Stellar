@@ -1,3 +1,7 @@
+import {
+  responseAbortSignal,
+  TransferError,
+} from "../services/transferExecution";
 import { Router, Request, Response } from "express";
 import connectDb from "../db/connectDb";
 import { authLimiter } from "../middleware/rateLimiter";
@@ -17,11 +21,11 @@ export const exportRouter = Router();
 
 /**
  * User data export endpoints.
- * 
+ *
  * Users can export only their own data.
  * Admins (with valid admin token) can export any user's data.
  * Exports are retained for 24 hours, then automatically cleaned up.
- * 
+ *
  * GET    /api/exports         — list user's exports
  * POST   /api/exports         — initiate a new export (scope: prompt|history|full)
  * GET    /api/exports/:id     — check export status and download
@@ -31,6 +35,7 @@ export const exportRouter = Router();
 exportRouter.get(
   "/",
   authLimiter,
+  requireAdminScope("exports:read"),
   async (req: AdminRequest, res: Response) => {
     try {
       await connectDb();
@@ -44,7 +49,9 @@ exportRouter.get(
       let isAdminCheck = isAdmin;
 
       if (isAdmin && !userId) {
-        return res.status(400).json({ error: "userId query parameter required for admin exports" });
+        return res
+          .status(400)
+          .json({ error: "userId query parameter required for admin exports" });
       }
 
       // If not admin, use the admin's sub as the userId
@@ -64,7 +71,7 @@ exportRouter.get(
 
 /**
  * Initiate a new user data export.
- * 
+ *
  * Body parameters:
  * - userId: ID of the user whose data to export (optional; defaults to authenticated user)
  * - scope: "prompt" | "history" | "full" (default: "prompt")
@@ -73,12 +80,17 @@ exportRouter.get(
 exportRouter.post(
   "/",
   authLimiter,
+  requireAdminScope("exports:write"),
   requireIdempotency,
   async (req: AdminRequest, res: Response) => {
     try {
       await connectDb();
 
-      const { userId, scope = "prompt", reason = "User-initiated data export" } = req.body as {
+      const {
+        userId,
+        scope = "prompt",
+        reason = "User-initiated data export",
+      } = req.body as {
         userId?: string;
         scope?: ExportScope;
         reason?: string;
@@ -98,7 +110,12 @@ exportRouter.post(
       }
 
       // Authorization check: regular users can only export their own data
-      if (req.admin && req.admin.sub && targetUserId && req.admin.sub !== targetUserId) {
+      if (
+        req.admin &&
+        req.admin.sub &&
+        targetUserId &&
+        req.admin.sub !== targetUserId
+      ) {
         // Admin exporting another user's data - authorized
       } else if (!req.admin || !req.admin.sub) {
         // Regular user - must export their own data
@@ -107,10 +124,15 @@ exportRouter.post(
 
       // Initiate the export
       const exportRecord = await runUserExport(
-        req.admin?.sub as string || "",
+        (req.admin?.sub as string) || "",
         targetUserId,
         scope as ExportScope,
         !!req.admin,
+        {
+          transferId: req.body.transferId,
+          signal: responseAbortSignal(res),
+          onStarted: (id) => res.setHeader("X-Transfer-Id", id),
+        },
       );
 
       res.status(202).json({
@@ -121,10 +143,18 @@ exportRouter.post(
         metadata: exportRecord.metadata,
         generatedAt: exportRecord.generatedAt,
         expiresAt: exportRecord.expiresAt,
-        message: "Export initiated. Use GET /api/exports/:id to check status and download.",
+        message:
+          "Export initiated. Use GET /api/exports/:id to check status and download.",
       });
     } catch (err: any) {
       console.error("Failed to initiate export:", err);
+      if (
+        err instanceof TransferError ||
+        err.status === 400 ||
+        err.status === 403
+      ) {
+        return res.status(err.status).json({ error: err.message });
+      }
       if (err.message?.includes("Not authorized")) {
         return res.status(403).json({ error: err.message });
       }
@@ -135,13 +165,14 @@ exportRouter.post(
 
 /**
  * Check export status and download.
- * 
+ *
  * GET /api/exports/:id
  * GET /api/exports/:id/download?token=...
  */
 exportRouter.get(
   "/:exportId",
   authLimiter,
+  requireAdminScope("exports:read"),
   async (req: AdminRequest, res: Response) => {
     try {
       await connectDb();
@@ -157,12 +188,17 @@ exportRouter.get(
 
       // Check authorization
       const isAdmin = !!req.admin;
-      const requestingUserId = req.admin?.sub as string || "";
+      const requestingUserId = (req.admin?.sub as string) || "";
 
       // Regular users can only see their own exports
       if (!isAdmin && exportRecord.userId.toString() !== requestingUserId) {
-        return res.status(403).json({ error: "Not authorized to view this export" });
+        return res
+          .status(403)
+          .json({ error: "Not authorized to view this export" });
       }
+
+      if (exportRecord.expiresAt <= new Date())
+        return res.status(410).json({ error: "Export expired" });
 
       // If export is still pending or processing
       if (exportRecord.status !== "completed") {
@@ -172,18 +208,22 @@ exportRouter.get(
           generatedAt: exportRecord.generatedAt,
           expiresAt: exportRecord.expiresAt,
           metadata: exportRecord.metadata,
-          message: exportRecord.status === "pending"
-            ? "Export is being processed. Check back shortly."
-            : exportRecord.status === "failed"
-            ? "Export failed. Please try again."
-            : "Export is still being processed.",
+          message:
+            exportRecord.status === "pending"
+              ? "Export is being processed. Check back shortly."
+              : exportRecord.status === "failed"
+                ? "Export failed. Please try again."
+                : "Export is still being processed.",
         });
       }
 
       // Export is completed - check integrity checksum if available
       if (exportRecord.integrityChecksum && exportRecord.metadata) {
         const { records } = await getExportRecords(exportRecord._id.toString());
-        const checksumValid = verifyExportChecksum(records, exportRecord.integrityChecksum);
+        const checksumValid = verifyExportChecksum(
+          records,
+          exportRecord.integrityChecksum,
+        );
 
         return res.json({
           exportId: exportRecord._id,

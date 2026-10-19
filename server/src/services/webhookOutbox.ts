@@ -53,7 +53,6 @@ export async function enqueue(
 
   await Promise.all(
     subscriptions.map(async (sub) => {
-      let allocatedSequence = false;
       try {
         const existing = await WebhookOutboxEvent.findOne({
           subscriptionId: sub._id,
@@ -65,7 +64,6 @@ export async function enqueue(
           { $inc: { nextDeliverySequence: 1 } },
           { new: false },
         );
-        allocatedSequence = true;
         const sequence = sequencedSub?.nextDeliverySequence ?? sub.nextDeliverySequence ?? 1;
         await WebhookOutboxEvent.create({
           subscriptionId: sub._id,
@@ -80,11 +78,10 @@ export async function enqueue(
         });
       } catch (err: unknown) {
         if ((err as { code?: number }).code === 11000) {
-          if (allocatedSequence) {
-            await WebhookSubscription.findByIdAndUpdate(sub._id, {
-              $inc: { nextDeliverySequence: -1 },
-            });
-          }
+          // Never decrement an allocated sequence: another event may already
+          // have consumed the next value. Gaps are valid; reuse is unsafe.
+          const winner = await WebhookOutboxEvent.findOne({ subscriptionId: sub._id, dedupeKey });
+          if (!winner) throw err;
           return; // already enqueued
         }
         throw err;

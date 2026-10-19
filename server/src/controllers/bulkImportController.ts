@@ -1,10 +1,19 @@
 import { Request, Response } from "express";
+import mongoose from "mongoose";
+import { createHash } from "node:crypto";
+import {
+  beginTransfer,
+  responseAbortSignal,
+  TransferCancelledError,
+  TransferError,
+  type TransferExecution,
+} from "../services/transferExecution";
+import type { AdminRequest } from "../middleware/adminAuth";
 import Prompt from "../models/Prompt";
 import { provenanceService } from "../services/provenanceService";
 import { policyLimitService } from "../services/policyLimitService";
 import { logger } from "../services/structuredLogger";
 import { recordAuditEvent } from "../services/auditTrail";
-import { v4 as uuidv4 } from "uuid";
 
 /**
  * Bulk Import Controller (Issue #929)
@@ -36,6 +45,7 @@ interface BulkImportRequest {
     apiEndpoint?: string;
   };
   dryRun?: boolean;
+  transferId?: string;
 }
 
 interface BulkImportResult {
@@ -53,7 +63,8 @@ interface BulkImportResult {
     error: string;
     item: BulkImportItem;
   }>;
-  status: "completed" | "partial" | "failed";
+  status: "completed" | "partial" | "failed" | "cancelled";
+  transferId?: string;
 }
 
 /**
@@ -64,10 +75,14 @@ interface BulkImportResult {
  */
 export async function bulkImportPrompts(
   req: Request,
-  res: Response
+  res: Response,
 ): Promise<Response> {
+  let execution: TransferExecution | undefined;
   try {
-    const user = (req as any).user;
+    const admin = (req as AdminRequest).admin;
+    const user =
+      (req as any).user ||
+      (admin ? { _id: admin.sub, role: "admin" } : undefined);
     const walletAddress = (req as any).walletAddress || user?.walletAddress;
 
     // Validate admin/maintainer permissions
@@ -86,10 +101,15 @@ export async function bulkImportPrompts(
     }: BulkImportRequest = req.body;
 
     // Validate request
-    if (!items || !Array.isArray(items) || items.length === 0) {
+    if (
+      !items ||
+      !Array.isArray(items) ||
+      items.length === 0 ||
+      items.length > 1000
+    ) {
       return res.status(400).json({
         error: "Invalid request",
-        message: "items array is required and must not be empty",
+        message: "items array must contain between 1 and 1000 entries",
       });
     }
 
@@ -109,8 +129,20 @@ export async function bulkImportPrompts(
       });
     }
 
-    // Generate batch ID
-    const batchId = `batch_${Date.now()}_${uuidv4().slice(0, 8)}`;
+    if (!dryRun && !mongoose.isValidObjectId(user._id)) {
+      return res
+        .status(400)
+        .json({ error: "Import actor must reference a User ObjectId" });
+    }
+    execution = await beginTransfer(
+      String(admin?.sub || user._id),
+      "import",
+      { items, batchName, sourceSystem, dryRun },
+      req.body.transferId,
+      responseAbortSignal(res),
+    );
+    res.setHeader("X-Transfer-Id", execution.id);
+    const batchId = `batch_${execution.id}`;
     const batchStartTime = Date.now();
 
     logger.info("Starting bulk import", {
@@ -123,6 +155,7 @@ export async function bulkImportPrompts(
 
     const result: BulkImportResult = {
       batchId,
+      transferId: execution.id,
       totalItems: items.length,
       successfulItems: 0,
       failedItems: 0,
@@ -134,10 +167,11 @@ export async function bulkImportPrompts(
     // Process each item
     for (const [index, item] of items.entries()) {
       try {
+        await execution.check();
         // Validate item
         if (!item.title || !item.content || !item.image || !item.category) {
           throw new Error(
-            "Missing required fields: title, content, image, category"
+            "Missing required fields: title, content, image, category",
           );
         }
 
@@ -153,54 +187,76 @@ export async function bulkImportPrompts(
         }
 
         // Create prompt
-        const prompt = await Prompt.create({
-          title: item.title,
-          content: item.content,
-          description: item.description || "",
-          image: item.image,
-          category: item.category,
-          price: item.price,
-          tags: item.tags || [],
-          owner: user._id,
-          listingStatus: "draft", // Start as draft for review
-          isActive: false,
-        });
+        const promptId = createHash("sha256")
+          .update(`${batchId}:${index}:prompt`)
+          .digest("hex")
+          .slice(0, 24);
+        const prompt = await execution.step(`prompt_${index}`, promptId, () =>
+          Prompt.findOneAndUpdate(
+            { _id: promptId },
+            {
+              $setOnInsert: {
+                title: item.title,
+                content: item.content,
+                description: item.description || "",
+                image: item.image,
+                category: item.category,
+                price: item.price,
+                tags: item.tags || [],
+                owner: user._id,
+                listingStatus: "draft", // Start as draft for review
+                isActive: false,
+              },
+            },
+            { upsert: true, new: true, runValidators: true },
+          ),
+        );
 
         // Create provenance record
-        const provenanceRecord = await provenanceService.createProvenanceRecord({
-          promptId: prompt._id.toString(),
-          sourceType: "file_upload",
-          sourceSystem: sourceSystem || {
-            systemName: "Bulk Import",
-            systemVersion: "1.0.0",
+        const provenanceRecord = await provenanceService.createProvenanceRecord(
+          {
+            promptId: prompt._id.toString(),
+            recovery: {
+              execution,
+              index,
+              provenanceId: createHash("sha256")
+                .update(`${batchId}:${index}:provenance`)
+                .digest("hex")
+                .slice(0, 24),
+            },
+            sourceType: "file_upload",
+            sourceSystem: sourceSystem || {
+              systemName: "Bulk Import",
+              systemVersion: "1.0.0",
+            },
+            importBatch: {
+              batchId,
+              batchName: batchName || `Bulk import ${new Date().toISOString()}`,
+              totalItems: items.length,
+              successfulItems: result.successfulItems,
+              failedItems: result.failedItems,
+              status: "processing",
+              startedAt: new Date(batchStartTime),
+            },
+            actor: {
+              actorType: user.role === "admin" ? "admin" : "user",
+              actorId: user._id.toString(),
+              actorName: user.username || user.displayName,
+              actorWallet: walletAddress,
+              actorEmail: user.email,
+              actorRole: user.role,
+              actorIp: req.ip,
+              actorUserAgent: req.headers["user-agent"],
+            },
+            metadata: {
+              externalId: item.externalId,
+              externalUrl: item.externalUrl,
+              sourceMetadata: item.sourceMetadata,
+              importIndex: index,
+              batchId,
+            },
           },
-          importBatch: {
-            batchId,
-            batchName: batchName || `Bulk import ${new Date().toISOString()}`,
-            totalItems: items.length,
-            successfulItems: result.successfulItems,
-            failedItems: result.failedItems,
-            status: "processing",
-            startedAt: new Date(batchStartTime),
-          },
-          actor: {
-            actorType: user.role === "admin" ? "admin" : "user",
-            actorId: user._id.toString(),
-            actorName: user.username || user.displayName,
-            actorWallet: walletAddress,
-            actorEmail: user.email,
-            actorRole: user.role,
-            actorIp: req.ip,
-            actorUserAgent: req.headers["user-agent"],
-          },
-          metadata: {
-            externalId: item.externalId,
-            externalUrl: item.externalUrl,
-            sourceMetadata: item.sourceMetadata,
-            importIndex: index,
-            batchId,
-          },
-        });
+        );
 
         result.successfulItems++;
         result.imported.push({
@@ -215,6 +271,10 @@ export async function bulkImportPrompts(
           index,
         });
       } catch (error: any) {
+        if (error instanceof TransferCancelledError) {
+          result.status = "cancelled";
+          break;
+        }
         result.failedItems++;
         result.failed.push({
           externalId: item.externalId,
@@ -233,28 +293,41 @@ export async function bulkImportPrompts(
     // Update batch status
     const batchCompletedAt = new Date();
     result.status =
-      result.failedItems === 0
-        ? "completed"
-        : result.successfulItems > 0
-        ? "partial"
-        : "failed";
+      result.status === "cancelled"
+        ? "cancelled"
+        : result.failedItems === 0
+          ? "completed"
+          : result.successfulItems > 0
+            ? "partial"
+            : "failed";
 
     // Update all provenance records with final batch status
     if (!dryRun) {
-      await provenanceService.queryProvenance({ batchId }).then((records) => {
-        records.forEach(async (record) => {
-          if (record.importBatch) {
-            record.importBatch.status = result.status;
-            record.importBatch.successfulItems = result.successfulItems;
-            record.importBatch.failedItems = result.failedItems;
-            record.importBatch.completedAt = batchCompletedAt;
-            if (result.failedItems > 0) {
-              record.importBatch.errorSummary = `${result.failedItems} items failed to import`;
-            }
-            await record.save();
-          }
-        });
+      const records = await provenanceService.queryProvenance({
+        batchId,
+        limit: items.length,
       });
+      // Finalize already committed rows even after cancellation; this is
+      // bookkeeping, never another imported prompt.
+      for (const record of records) {
+        if (record.importBatch) {
+          record.importBatch.status =
+            result.status === "cancelled" ? "partial" : result.status;
+          record.importBatch.successfulItems = result.successfulItems;
+          record.importBatch.failedItems = result.failedItems;
+          record.importBatch.completedAt = batchCompletedAt;
+          record.importBatch.errorSummary =
+            result.failedItems > 0
+              ? `${result.failedItems} items failed to import`
+              : undefined;
+          await execution.step(
+            `finalize_${record._id}`,
+            String(record._id),
+            () => record.save(),
+            { settlement: true },
+          );
+        }
+      }
     }
 
     // Audit log
@@ -281,13 +354,32 @@ export async function bulkImportPrompts(
       durationMs: Date.now() - batchStartTime,
     });
 
+    try {
+      await execution.check();
+      await execution.finish(result.failedItems ? "failed" : "completed");
+    } catch (err) {
+      if (!(err instanceof TransferCancelledError)) throw err;
+      result.status = "cancelled";
+      await execution.finish("cancelled");
+    }
     return res.status(result.status === "failed" ? 400 : 200).json({
-      success: result.status !== "failed",
+      success: result.status === "completed" || result.status === "partial",
       result,
     });
   } catch (error: any) {
-    logger.error("Bulk import error", { error: error.message, stack: error.stack });
-    
+    if (execution)
+      await execution.finish(
+        error instanceof TransferCancelledError ? "cancelled" : "failed",
+      );
+    if (error instanceof TransferError)
+      return res
+        .status(error.status)
+        .json({ error: error.message, transferId: execution?.id });
+    logger.error("Bulk import error", {
+      error: error.message,
+      stack: error.stack,
+    });
+
     return res.status(500).json({
       error: "Internal server error",
       message: error.message,
@@ -302,7 +394,7 @@ export async function bulkImportPrompts(
  */
 export async function getBulkImportStatus(
   req: Request,
-  res: Response
+  res: Response,
 ): Promise<Response> {
   try {
     const { batchId } = req.params;
@@ -340,8 +432,11 @@ export async function getBulkImportStatus(
       })),
     });
   } catch (error: any) {
-    logger.error("Failed to get bulk import status", { error, batchId: req.params.batchId });
-    
+    logger.error("Failed to get bulk import status", {
+      error,
+      batchId: req.params.batchId,
+    });
+
     return res.status(500).json({
       error: "Internal server error",
       message: error.message,
@@ -356,7 +451,7 @@ export async function getBulkImportStatus(
  */
 export async function listBulkImports(
   req: Request,
-  res: Response
+  res: Response,
 ): Promise<Response> {
   try {
     const { limit = 50, offset = 0, status } = req.query;
@@ -392,7 +487,10 @@ export async function listBulkImports(
 
     const batches = Array.from(batchMap.values())
       .filter((batch) => !status || batch.status === status)
-      .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
+      .sort(
+        (a, b) =>
+          new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
+      )
       .slice(Number(offset), Number(offset) + Number(limit));
 
     return res.status(200).json({
@@ -404,7 +502,7 @@ export async function listBulkImports(
     });
   } catch (error: any) {
     logger.error("Failed to list bulk imports", { error });
-    
+
     return res.status(500).json({
       error: "Internal server error",
       message: error.message,

@@ -1,7 +1,7 @@
 import connectDb from "../db/connectDb";
 import { ExportRecord, type IExportRecord } from "../models/ExportRecord";
 import Prompt from "../models/Prompt";
-import User from "../models/User";
+import { beginTransfer, TransferCancelledError } from "./transferExecution";
 import { hashWalletAddress } from "../services/auditTrail";
 import crypto from "crypto";
 
@@ -14,7 +14,7 @@ export const EXPORT_SCOPES = {
   FULL: "full",
 } as const;
 
-export type ExportScope = keyof typeof EXPORT_SCOPES;
+export type ExportScope = (typeof EXPORT_SCOPES)[keyof typeof EXPORT_SCOPES];
 
 /**
  * Export retention: exports are valid for 24 hours after generation.
@@ -66,13 +66,13 @@ function buildExportPrompt(prompt: any, isSelfExport: boolean): any {
     isActive: prompt.isActive,
     price: prompt.price,
     // Include wallet hash instead of raw address for privacy
-    ownerWalletHash: prompt.owner ? hashWalletAddress(String(prompt.owner)) : null,
-    // Field-level authorization (#1042): contentHash is only useful for the
-    // owner verifying their own content integrity. An admin pulling someone
-    // else's export (compliance/support) gets everything above, but not
-    // this field — they don't need it, so it's excluded, not just hashed.
+    ownerWalletHash: prompt.owner
+      ? hashWalletAddress(String(prompt.owner))
+      : null,
+    // Preserve upstream field-level authorization: cross-user admin exports
+    // omit contentHash; only the owner can export it for integrity checks.
     ...(isSelfExport ? { contentHash: prompt.contentHash ?? null } : {}),
-    // Still excluded for everyone: encryptedPrompt, full description.
+    // Always exclude encryptedPrompt and full description.
     createdAt: prompt.createdAt,
     updatedAt: prompt.updatedAt,
     lifecycleState: prompt.lifecycleState,
@@ -83,10 +83,7 @@ function buildExportPrompt(prompt: any, isSelfExport: boolean): any {
  * Build a history entry for export.
  * Includes lifecycle events without exposing sensitive data.
  */
-function buildExportHistoryEntry(
-  prompt: any,
-  event: any,
-): any {
+function buildExportHistoryEntry(prompt: any, event: any): any {
   return {
     promptId: prompt._id,
     event: event.action,
@@ -100,7 +97,7 @@ function buildExportHistoryEntry(
 
 /**
  * Run a user-owned data export.
- * 
+ *
  * @param requestingUserId - ID of the user requesting the export
  * @param targetUserId - ID of the user whose data to export (defaults to requesting user)
  * @param scope - export scope: "prompt", "history", or "full"
@@ -112,183 +109,126 @@ export async function runUserExport(
   targetUserId?: string,
   scope: ExportScope = "prompt",
   isAdmin = false,
+  options: {
+    transferId?: string;
+    signal?: AbortSignal;
+    onStarted?: (id: string) => void;
+  } = {},
 ): Promise<IExportRecord> {
-  await connectDb();
-
-  // Determine the target user ID
   const userIdToExport = targetUserId || requestingUserId;
-
-  // Authorization check
-  const authorized = await isAuthorizedForExport(
-    requestingUserId,
-    userIdToExport,
-    isAdmin,
-  );
-
-  if (!authorized) {
-    const error = new Error("Not authorized to export this user's data");
-    error.status = 403;
-    throw error;
-  }
-
-  // Create export record
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + EXPORT_RETENTION_MS);
-
-  const exportRecord = await ExportRecord.create({
-    userId: userIdToExport,
-    scope,
-    status: "pending",
-    generatedAt: now,
-    expiresAt,
-    metadata: {
-      schemaVersion: "1.0.0",
-      recordCount: 0,
-      includeWalletHashes: scope !== "prompt" || true, // prompt scope always includes hashes
-      includeHistory: scope === "history" || scope === "full",
-    },
-    auditTrail: {
-      action: "user_export_initiated",
-      performedBy: requestingUserId,
-      reason: `Export request for scope=${scope} user=${userIdToExport}`,
-    },
-  });
-
-  // Fetch the appropriate data based on scope
-  let records: any[] = [];
-  let recordCount = 0;
-
-  try {
-    if (scope === "prompt") {
-      // Export only prompts owned by this user
-      const isSelfExport = requestingUserId === userIdToExport;
-      const prompts = await Prompt.find({ owner: userIdToExport })
-        .select(
-          "onChainId title category isActive price owner contentHash createdAt updatedAt lifecycleState",
-        )
-        .lean();
-
-      records = prompts.map((prompt) => buildExportPrompt(prompt, isSelfExport));
-      recordCount = records.length;
-
-      // Update export record with results
-      await ExportRecord.findByIdAndUpdate(exportRecord._id, {
-        $set: {
-          status: "completed",
-          metadata: {
-            ...exportRecord.metadata,
-            recordCount,
-          },
-        },
-        $set: {
-          integrityChecksum: exportChecksum(records),
-        },
-      });
-    } else if (scope === "history") {
-      // Export prompt history/lifecycle events
-      // Fetch prompts first, then their history
-      const prompts = await Prompt.find({ owner: userIdToExport })
-        .select("_id lifecycleHistory")
-        .lean();
-
-      records = [];
-      recordCount = 0;
-
-      for (const prompt of prompts) {
-        if (prompt.lifecycleHistory && prompt.lifecycleHistory.length > 0) {
-          const historyEntries = prompt.lifecycleHistory
-            .slice(0, 100) // Limit per prompt to avoid huge exports
-            .map((event: any) => buildExportHistoryEntry(prompt, event));
-
-          records.push(...historyEntries);
-          recordCount += historyEntries.length;
-        }
-      }
-
-      // Update export record
-      await ExportRecord.findByIdAndUpdate(exportRecord._id, {
-        $set: {
-          status: "completed",
-          metadata: {
-            ...exportRecord.metadata,
-            recordCount,
-            includeHistory: true,
-          },
-        },
-        $set: {
-          integrityChecksum: exportChecksum(records),
-        },
-      });
-    } else if (scope === "full") {
-      // Export prompts + full history + metadata
-      const prompts = await Prompt.find({ owner: userIdToExport })
-        .select(
-          "_id onChainId title category isActive price owner " +
-            "createdAt updatedAt lifecycleState lifecycleHistory",
-        )
-        .lean();
-
-      records = [];
-      recordCount = 0;
-
-      for (const prompt of prompts) {
-        // Export prompt data
-        const promptData = buildExportPrompt(prompt);
-        records.push(promptData);
-        recordCount += 1;
-
-        // Export history entries
-        if (prompt.lifecycleHistory && prompt.lifecycleHistory.length > 0) {
-          const historyEntries = prompt.lifecycleHistory
-            .slice(0, 100)
-            .map((event: any) => buildExportHistoryEntry(prompt, event));
-
-          records.push(...historyEntries);
-          recordCount += historyEntries.length;
-        }
-      }
-
-      // Update export record
-      await ExportRecord.findByIdAndUpdate(exportRecord._id, {
-        $set: {
-          status: "completed",
-          metadata: {
-            ...exportRecord.metadata,
-            recordCount,
-            includeHistory: true,
-          },
-        },
-        $set: {
-          integrityChecksum: exportChecksum(records),
-        },
-      });
-    }
-
-    // Generate download URL
-    const downloadUrl = generateDownloadUrl(
-      exportRecord._id.toString(),
-      exportRecord.expiresAt,
+  if (
+    !requestingUserId ||
+    !(await isAuthorizedForExport(requestingUserId, userIdToExport, isAdmin))
+  ) {
+    throw Object.assign(
+      new Error("Not authorized to export this user's data"),
+      { status: 403 },
     );
-
-    // Update with download URL
-    await ExportRecord.findByIdAndUpdate(exportRecord._id, {
-      $set: {
-        fileUrl: downloadUrl,
-      },
-    });
-
-    return {
-      ...exportRecord.toObject(),
-      fileUrl: downloadUrl,
-    } as IExportRecord;
+  }
+  if (!Object.values(EXPORT_SCOPES).includes(scope)) {
+    throw Object.assign(new Error("Invalid export scope"), { status: 400 });
+  }
+  await connectDb();
+  const execution = await beginTransfer(
+    requestingUserId,
+    "export",
+    { userIdToExport, scope },
+    options.transferId,
+    options.signal,
+  );
+  options.onStarted?.(execution.id);
+  // Stable artifact identity makes creation/retry safe after a lost DB reply.
+  const exportId = execution.id;
+  try {
+    const now = new Date();
+    const exportRecord = await execution.step("artifact", exportId, () =>
+      ExportRecord.findOneAndUpdate(
+        { _id: exportId },
+        {
+          $setOnInsert: {
+            userId: userIdToExport,
+            scope,
+            status: "pending",
+            generatedAt: now,
+            expiresAt: new Date(now.getTime() + EXPORT_RETENTION_MS),
+            metadata: {
+              schemaVersion: "1.0.0",
+              recordCount: 0,
+              includeWalletHashes: true,
+              includeHistory: scope !== "prompt",
+            },
+            auditTrail: {
+              action: "user_export_initiated",
+              performedBy: requestingUserId,
+              reason: `Export request for scope=${scope}`,
+            },
+          },
+        },
+        { upsert: true, new: true, runValidators: true },
+      ),
+    );
+    if (exportRecord.expiresAt <= now)
+      throw new Error("Export expired; create a new transfer");
+    const records: any[] = [];
+    // Cursor avoids loading the entire source collection before cancellation
+    // can be observed. It is closed on success, failure and cancellation.
+    const isSelfExport = requestingUserId === userIdToExport;
+    const cursor = Prompt.find({ owner: userIdToExport })
+      .select(
+        "_id onChainId title category isActive price owner createdAt updatedAt lifecycleState lifecycleHistory" +
+          (isSelfExport ? " contentHash" : ""),
+      )
+      .lean()
+      .cursor();
+    try {
+      for await (const prompt of cursor) {
+        await execution.check();
+        if (scope !== "history")
+          records.push(buildExportPrompt(prompt, isSelfExport));
+        if (scope !== "prompt") {
+          records.push(
+            ...(prompt.lifecycleHistory ?? [])
+              .slice(0, 100)
+              .map((event: any) => buildExportHistoryEntry(prompt, event)),
+          );
+        }
+      }
+    } finally {
+      await cursor.close();
+    }
+    await execution.check();
+    const downloadUrl = generateDownloadUrl(exportId, exportRecord.expiresAt);
+    const completed = await execution.step("publish", exportId, () =>
+      ExportRecord.findByIdAndUpdate(
+        exportId,
+        {
+          $set: {
+            status: "completed",
+            fileUrl: downloadUrl,
+            integrityChecksum: exportChecksum(records),
+            "metadata.recordCount": records.length,
+          },
+        },
+        { new: true },
+      ),
+    );
+    await execution.finish("completed");
+    return completed as IExportRecord;
   } catch (err) {
-    // Mark export as failed
-    await ExportRecord.findByIdAndUpdate(exportRecord._id, {
-      $set: {
-        status: "failed",
+    const cancelled = err instanceof TransferCancelledError;
+    // Never publish an artifact after cancellation/failure. No physical object
+    // storage exists in this service; future adapters must delete temp objects.
+    await ExportRecord.updateOne(
+      { _id: exportId },
+      {
+        $set: {
+          status: cancelled ? "cancelled" : "failed",
+          "metadata.recordCount": 0,
+        },
+        $unset: { fileUrl: "", integrityChecksum: "" },
       },
-    });
-
+    );
+    await execution.finish(cancelled ? "cancelled" : "failed");
     throw err;
   }
 }
@@ -347,10 +287,17 @@ export async function cleanupExpiredExports(): Promise<number> {
 
   const result = await ExportRecord.deleteMany({
     expiresAt: { $lt: new Date() },
-    status: { $ne: "expired" },
+    status: { $in: ["completed", "failed", "cancelled", "expired"] },
   });
 
   return result.deletedCount;
 }
 
-export default { runUserExport, listUserExports, cleanupExpiredExports, verifyExportChecksum, EXPORT_SCOPES, EXPORT_RETENTION_MS };
+export default {
+  runUserExport,
+  listUserExports,
+  cleanupExpiredExports,
+  verifyExportChecksum,
+  EXPORT_SCOPES,
+  EXPORT_RETENTION_MS,
+};

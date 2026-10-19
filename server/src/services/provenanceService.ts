@@ -1,3 +1,4 @@
+import type { TransferExecution } from "./transferExecution";
 import ProvenanceRecord, {
   ImportSourceType,
   TransformType,
@@ -22,6 +23,7 @@ import { recordAuditEvent } from "./auditTrail";
  */
 
 export interface CreateProvenanceParams {
+  recovery?: { execution: TransferExecution; index: number; provenanceId: string };
   promptId: string;
   onChainId?: string;
   sourceType: ImportSourceType;
@@ -98,7 +100,7 @@ class ProvenanceService {
       }
 
       // Create provenance record
-      const provenanceRecord = new ProvenanceRecord({
+      const recordData = {
         promptId,
         onChainId,
         sourceType,
@@ -110,18 +112,26 @@ class ProvenanceService {
         sourcePromptId: sourcePromptId || null,
         metadata: metadata || {},
         verificationStatus: "unverified",
-      });
+      };
 
-      await provenanceRecord.save();
+      const recovery = params.recovery;
+      const provenanceRecord = recovery
+        ? await recovery.execution.step(`provenance_${recovery.index}`, recovery.provenanceId,
+          () => ProvenanceRecord.findOneAndUpdate({ _id: recovery.provenanceId },
+            { $setOnInsert: recordData }, { upsert: true, new: true, runValidators: true }))
+        : await new ProvenanceRecord(recordData).save();
 
       // Update prompt with provenance reference
-      await Prompt.findByIdAndUpdate(promptId, {
+      const link = () => Prompt.findByIdAndUpdate(promptId, {
         provenanceSource: sourceType,
         provenanceBatchId: importBatch?.batchId || null,
         provenanceActorId: actor.actorId,
         provenanceRecordId: provenanceRecord._id,
         hasProvenance: true,
       });
+      // Recovery imports use the canonical ProvenanceRecord.promptId relation.
+      // The legacy back-reference fields are not in Prompt's strict schema.
+      if (!recovery) await link();
 
       // Audit log
       await recordAuditEvent({

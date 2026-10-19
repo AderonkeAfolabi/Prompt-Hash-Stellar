@@ -107,7 +107,7 @@ function isDuplicateKeyError(err: unknown): boolean {
 export async function deliverNotification(
   input: DeliverNotificationInput,
 ): Promise<DeliveryReceipt> {
-  const wallet = input.recipientWallet.toLowerCase();
+  const wallet = input.recipientWallet.trim().toLowerCase();
   const preferences = await resolvePreferences(wallet, input.preferences);
   const plan = planNotificationDelivery(input.type, preferences);
 
@@ -143,8 +143,9 @@ export async function deliverNotification(
     // Exactly-once delivery: the same logical event was already persisted.
     alreadyDelivered = true;
     const existing = await Notification.findOne({
-      dedupeKey: input.dedupeKey,
+      recipientWallet: wallet, type: input.type, dedupeKey: input.dedupeKey,
     }).lean();
+    if (!existing) throw err;
     notificationId = existing
       ? String((existing as { _id?: unknown })._id ?? "")
       : undefined;
