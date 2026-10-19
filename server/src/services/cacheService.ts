@@ -1,8 +1,28 @@
 import { createClient, type RedisClientType } from "redis";
 import { logger } from "./structuredLogger";
+import { BoundedCache, type CacheLookup } from "./boundedCache";
 
 let client: RedisClientType | null = null;
 let connectingPromise: Promise<RedisClientType | null> | null = null;
+
+const configuredMaxEntries = Number.parseInt(
+  process.env.LOCAL_CACHE_MAX_ENTRIES ?? "500",
+  10,
+);
+const localCache = new BoundedCache<string>({
+  maxEntries:
+    Number.isSafeInteger(configuredMaxEntries) && configuredMaxEntries > 0
+      ? configuredMaxEntries
+      : 500,
+  defaultTtlMs: 60_000,
+  defaultStaleMs: 48_000,
+});
+
+// Authorization decisions fail closed when Redis is unavailable. A local copy
+// could miss an invalidation published by another replica and must not grant access.
+function canUseLocalFallback(key: string): boolean {
+  return !key.startsWith("entitlement:");
+}
 
 export async function getClient(): Promise<RedisClientType | null> {
   const redisUrl = process.env.REDIS_URL;
@@ -17,7 +37,10 @@ export async function getClient(): Promise<RedisClientType | null> {
     try {
       const c = createClient({ url: redisUrl }) as RedisClientType;
       c.on("error", (err) => {
-        logger.error("Redis client error", { action: "cacheService", error: err });
+        logger.error("Redis client error", {
+          action: "cacheService",
+          error: err,
+        });
       });
       c.on("reconnecting", () => {
         logger.info("Redis reconnecting", { action: "cacheService" });
@@ -26,7 +49,10 @@ export async function getClient(): Promise<RedisClientType | null> {
       client = c;
       return client;
     } catch (err) {
-      logger.error("Failed to connect to Redis", { action: "cacheService", error: err });
+      logger.error("Failed to connect to Redis", {
+        action: "cacheService",
+        error: err,
+      });
       client = null;
       return null;
     } finally {
@@ -44,12 +70,22 @@ export const CATEGORY_TTL_SECONDS = 600; // 10 minutes
 export async function cacheGet(key: string): Promise<string | null> {
   try {
     const c = await getClient();
-    if (!c) return null;
-    return await c.get(key);
+    if (!c)
+      return canUseLocalFallback(key) ? (localCache.get(key) ?? null) : null;
+    const value = await c.get(key);
+    if (value !== null && canUseLocalFallback(key)) {
+      localCache.set(key, value);
+    }
+    return value;
   } catch (err) {
     logger.debug("Cache get failed", { action: "cacheGet", key, error: err });
-    return null;
+    return canUseLocalFallback(key) ? (localCache.get(key) ?? null) : null;
   }
+}
+
+/** Exposes stale state for metrics/debugging without ever serving stale data. */
+export function inspectLocalCache(key: string): CacheLookup<string> {
+  return localCache.inspect(key);
 }
 
 export async function cacheGetJson<T>(key: string): Promise<T | null> {
@@ -58,7 +94,11 @@ export async function cacheGetJson<T>(key: string): Promise<T | null> {
     if (!raw) return null;
     return JSON.parse(raw) as T;
   } catch (err) {
-    logger.debug("Cache get JSON failed or parse error", { action: "cacheGetJson", key, error: err });
+    logger.debug("Cache get JSON failed or parse error", {
+      action: "cacheGetJson",
+      key,
+      error: err,
+    });
     return null;
   }
 }
@@ -69,6 +109,13 @@ export async function cacheSet(
   ttlSeconds = DEFAULT_TTL_SECONDS,
 ): Promise<void> {
   try {
+    if (canUseLocalFallback(key)) {
+      const ttlMs =
+        Number.isFinite(ttlSeconds) && ttlSeconds > 0
+          ? ttlSeconds * 1_000
+          : DEFAULT_TTL_SECONDS * 1_000;
+      localCache.set(key, value, ttlMs, ttlMs * 0.8);
+    }
     const c = await getClient();
     if (!c) return;
     await c.set(key, value, { EX: ttlSeconds });
@@ -86,23 +133,37 @@ export async function cacheSetJson<T>(
     const serialized = JSON.stringify(value);
     await cacheSet(key, serialized, ttlSeconds);
   } catch (err) {
-    logger.debug("Cache set JSON serialization failed", { action: "cacheSetJson", key, error: err });
+    logger.debug("Cache set JSON serialization failed", {
+      action: "cacheSetJson",
+      key,
+      error: err,
+    });
   }
 }
 
 export async function cacheDel(...keys: string[]): Promise<void> {
   try {
     if (!keys || keys.length === 0) return;
+    for (const key of keys) localCache.invalidate(key);
     const c = await getClient();
     if (!c) return;
     await c.del(keys);
   } catch (err) {
-    logger.debug("Cache delete failed", { action: "cacheDel", keys, error: err });
+    logger.debug("Cache delete failed", {
+      action: "cacheDel",
+      keys,
+      error: err,
+    });
   }
 }
 
 export async function cacheDelPattern(pattern: string): Promise<void> {
   try {
+    const escaped = pattern
+      .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*/g, ".*");
+    const matcher = new RegExp(`^${escaped}$`);
+    localCache.invalidateWhere((key) => matcher.test(key));
     const c = await getClient();
     if (!c) return;
     const keys = await c.keys(pattern);
@@ -110,7 +171,11 @@ export async function cacheDelPattern(pattern: string): Promise<void> {
       await c.del(keys);
     }
   } catch (err) {
-    logger.debug("Cache delete pattern failed", { action: "cacheDelPattern", pattern, error: err });
+    logger.debug("Cache delete pattern failed", {
+      action: "cacheDelPattern",
+      pattern,
+      error: err,
+    });
   }
 }
 
@@ -156,4 +221,3 @@ export async function invalidatePromptCaches(promptId: string): Promise<void> {
     });
   }
 }
-

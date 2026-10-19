@@ -19,6 +19,7 @@
     "prebuild": "node scripts/policy-scanner.mjs && node scripts/check-local-setup.mjs",
     "typecheck": "tsc -b",
     "test": "vitest run",
+    "test:fuzz": "vitest run src/test/fuzz-boundaries.test.ts",
     "test:frontend": "vitest run",
     "test:a11y:regression": "vitest run src/test/a11y/regression",
     "test:frontend:watch": "vitest",

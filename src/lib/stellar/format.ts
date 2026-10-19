@@ -11,8 +11,30 @@ export function stroopsToXlmString(stroops: bigint): string {
  * Converts XLM to stroops
  */
 export function xlmToStroops(xlm: number | string): bigint {
-  const val = typeof xlm === "string" ? parseFloat(xlm) : xlm;
-  return BigInt(Math.round(val * 10_000_000));
+  if (typeof xlm === "number") {
+    if (!Number.isFinite(xlm)) {
+      throw new RangeError("XLM amount must be a finite number");
+    }
+    const stroops = Math.round(xlm * 10_000_000);
+    if (!Number.isSafeInteger(stroops)) {
+      throw new RangeError(
+        "XLM amount exceeds the safely representable numeric range",
+      );
+    }
+    return BigInt(stroops);
+  }
+
+  const value = xlm.trim();
+  const match = /^([+-]?)(\d+)(?:\.(\d{1,7}))?$/.exec(value);
+  if (!match) {
+    throw new TypeError(
+      "Enter a valid XLM amount with up to 7 decimal places.",
+    );
+  }
+
+  const [, sign, whole, fraction = ""] = match;
+  const stroops = BigInt(whole) * 10_000_000n + BigInt(fraction.padEnd(7, "0"));
+  return sign === "-" ? -stroops : stroops;
 }
 
 /**
@@ -36,4 +58,3 @@ export function formatAddress(
   }
   return `${address.slice(0, prefixLength)}...${address.slice(-suffixLength)}`;
 }
-

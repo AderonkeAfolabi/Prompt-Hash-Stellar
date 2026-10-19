@@ -24,7 +24,8 @@
     "db:rollback": "ts-node src/db/rollbackCli.ts",
     "retention:enqueue": "ts-node scripts/enqueueRetentionCleanup.ts",
     "repair:entitlement": "ts-node scripts/repairEntitlement.ts",
-    "data:integrity:monitor": "ts-node scripts/dataIntegrityMonitor.ts"
+    "data:integrity:monitor": "ts-node scripts/dataIntegrityMonitor.ts",
+    "monitor:synthetic": "ts-node scripts/runSyntheticJourney.ts"
   },
   "files": [
     "build"
