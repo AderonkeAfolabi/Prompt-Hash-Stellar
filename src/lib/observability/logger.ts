@@ -1,36 +1,14 @@
 import pino from "pino";
+import { REDACT_PATHS, REDACTED_CENSOR } from "./redactPaths";
 
 const isProduction = process.env.NODE_ENV === "production";
 const isTest = process.env.NODE_ENV === "test";
 
-// Fields to redact from logs for privacy and security
-const redactFields = [
-  "req.headers.authorization",
-  "req.headers.cookie",
-  "plaintext",
-  "secret",
-  "privateKey",
-  "unlockPrivateKey",
-  "challengeSecret",
-  "signedMessage",
-  "body.plaintext",
-  "body.secret",
-  "body.privateKey",
-  "body.signedMessage",
-  "res.body.plaintext",
-  // Wallet addresses are hashed before structured audit logs; raw values
-  // must not appear in log output (#224).
-  "walletAddress",
-  "address",
-  "body.address",
-  "body.walletAddress",
-];
-
 export const logger = pino({
   level: process.env.LOG_LEVEL || (isTest ? "silent" : "info"),
   redact: {
-    paths: redactFields,
-    censor: "[REDACTED]",
+    paths: [...REDACT_PATHS],
+    censor: REDACTED_CENSOR,
   },
   transport: undefined,
   base: {
