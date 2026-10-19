@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import { AUDIT_ACTIONS, AuditLog, AuditAction, AuditResult } from "../models/AuditLog";
 import { logger } from "./structuredLogger";
+import { canonicalJson } from "./canonicalSerialization";
 import { MaintenanceScope } from "../models/MaintenanceBanner";
 export { logger };
 
@@ -9,29 +10,18 @@ export { logger };
  * the original field set; version 2 also covers `actor` and `reason` and uses
  * canonical serialization.
  */
-export const AUDIT_INTEGRITY_VERSION = 2;
+/**
+ * Version 3 (#982) also covers `metadata`, which v2 stored without hashing it.
+ * Records written as v2 keep their original digests and still verify.
+ */
+export const AUDIT_INTEGRITY_VERSION = 3;
 
 const GENESIS_HASH = "0".repeat(64);
 const MAINTENANCE_TARGET_TYPE = "maintenance_banner";
 
-/**
- * Deterministic JSON serialization: object keys are sorted recursively and
- * `undefined` members are dropped, so the same logical record always produces
- * the same bytes regardless of property insertion order (#783).
- */
-export function canonicalJson(value: unknown): string {
-  if (value instanceof Date) return JSON.stringify(value.toISOString());
-  if (value === null || value === undefined || typeof value !== "object") {
-    return JSON.stringify(value ?? null);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  const members = Object.keys(record)
-    .filter((key) => record[key] !== undefined)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`);
-  return `{${members.join(",")}}`;
-}
+// Deterministic JSON for audit hashes (#783). The implementation lives in the
+// shared canonical layer (#979); re-exported here so existing imports keep working.
+export { canonicalJson };
 
 /**
  * One-way SHA-256 hash of a Stellar wallet address.
@@ -57,6 +47,7 @@ export interface AuditHashInput {
   afterState?: unknown;
   requestId: string | null;
   reason?: string | null;
+  metadata?: unknown;
   createdAt: Date;
   previousHash: string;
   integrityVersion?: number | null;
@@ -94,6 +85,8 @@ export function computeRecordHash(record: AuditHashInput): string {
     afterState: record.afterState ?? null,
     requestId: record.requestId ?? null,
     reason: record.reason ?? null,
+    // Only v3+ covers metadata; earlier digests were computed without it.
+    ...(record.integrityVersion >= 3 ? { metadata: record.metadata ?? null } : {}),
     createdAt: record.createdAt.toISOString(),
     previousHash: record.previousHash,
     integrityVersion: record.integrityVersion,
@@ -114,6 +107,7 @@ export function hashInputFromRow(row: any): AuditHashInput {
     afterState: row.afterState ?? null,
     requestId: row.requestId ?? null,
     reason: row.reason ?? null,
+    metadata: row.metadata ?? null,
     createdAt: new Date(row.createdAt),
     previousHash: row.previousHash,
     integrityVersion: row.integrityVersion ?? null,
@@ -165,6 +159,87 @@ export interface AuditEventParams {
  * Fire-and-forget: DB errors are caught and logged to stderr; they never
  * propagate so a storage hiccup cannot block a legitimate unlock.
  */
+/**
+ * Chain appends made by this process run one at a time (#982). Without this,
+ * two concurrent recordAuditEvent calls can read the same head and fork the
+ * chain. Across replicas the unique previousHash index is the backstop.
+ */
+let chainAppendQueue: Promise<void> = Promise.resolve();
+
+function appendToChain<T>(task: () => Promise<T>): Promise<T> {
+  const run = chainAppendQueue.then(task);
+  chainAppendQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+const MAX_CHAIN_APPEND_ATTEMPTS = 3;
+
+/**
+ * Reads the chain head, hashes the new record on top of it and inserts it.
+ * An E11000 on previousHash means another replica appended first, so the head
+ * is read again and the append retried (#982).
+ */
+async function appendChainedRecord(
+  params: AuditEventParams,
+  walletHash: string | null,
+): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    const lastRecord = await AuditLog.findOne().sort({ createdAt: -1, _id: -1 }).lean();
+    const previousHash = lastRecord?.recordHash || GENESIS_HASH;
+
+    const now = new Date();
+    const recordHash = computeRecordHash({
+      action: params.action,
+      result: params.result,
+      promptId: params.promptId ?? null,
+      walletAddress: walletHash,
+      actor: params.actor ?? null,
+      target: params.target ?? null,
+      targetType: params.targetType ?? null,
+      beforeState: params.beforeState ?? null,
+      afterState: params.afterState ?? null,
+      requestId: params.requestId ?? null,
+      reason: params.reason ?? null,
+      metadata: params.metadata ?? null,
+      createdAt: now,
+      previousHash,
+      integrityVersion: AUDIT_INTEGRITY_VERSION,
+    });
+
+    try {
+      await AuditLog.create({
+        action: params.action,
+        result: params.result,
+        promptId: params.promptId ?? null,
+        // Store the hash, not the raw address, for DB-level privacy (#224).
+        walletAddress: walletHash,
+        actor: params.actor ?? null,
+        target: params.target ?? null,
+        targetType: params.targetType ?? null,
+        beforeState: params.beforeState ?? null,
+        afterState: params.afterState ?? null,
+        metadata: params.metadata ?? null,
+        requestId: params.requestId ?? null,
+        clientIp: params.clientIp ?? null,
+        reason: params.reason ?? null,
+        recordHash,
+        previousHash,
+        integrityVersion: AUDIT_INTEGRITY_VERSION,
+        // Persist the exact timestamp that was hashed; letting Mongoose stamp
+        // its own would make the record fail verification.
+        createdAt: now,
+      });
+      return;
+    } catch (err) {
+      const duplicate = (err as { code?: number } | null)?.code === 11000;
+      if (!duplicate || attempt >= MAX_CHAIN_APPEND_ATTEMPTS) throw err;
+    }
+  }
+}
+
 export async function recordAuditEvent(
   params: AuditEventParams,
   options: { throwOnError?: boolean } = {},
@@ -194,50 +269,7 @@ export async function recordAuditEvent(
   }
 
   try {
-    // Get the last audit record to compute hash chain
-    const lastRecord = await AuditLog.findOne().sort({ createdAt: -1, _id: -1 }).lean();
-    const previousHash = lastRecord?.recordHash || GENESIS_HASH;
-
-    const now = new Date();
-    const recordHash = computeRecordHash({
-      action: params.action,
-      result: params.result,
-      promptId: params.promptId ?? null,
-      walletAddress: walletHash,
-      actor: params.actor ?? null,
-      target: params.target ?? null,
-      targetType: params.targetType ?? null,
-      beforeState: params.beforeState ?? null,
-      afterState: params.afterState ?? null,
-      requestId: params.requestId ?? null,
-      reason: params.reason ?? null,
-      createdAt: now,
-      previousHash,
-      integrityVersion: AUDIT_INTEGRITY_VERSION,
-    });
-
-    await AuditLog.create({
-      action: params.action,
-      result: params.result,
-      promptId: params.promptId ?? null,
-      // Store the hash, not the raw address, for DB-level privacy (#224).
-      walletAddress: walletHash,
-      actor: params.actor ?? null,
-      target: params.target ?? null,
-      targetType: params.targetType ?? null,
-      beforeState: params.beforeState ?? null,
-      afterState: params.afterState ?? null,
-      metadata: params.metadata ?? null,
-      requestId: params.requestId ?? null,
-      clientIp: params.clientIp ?? null,
-      reason: params.reason ?? null,
-      recordHash,
-      previousHash,
-      integrityVersion: AUDIT_INTEGRITY_VERSION,
-      // Persist the exact timestamp that was hashed; letting Mongoose stamp
-      // its own would make the record fail verification.
-      createdAt: now,
-    });
+    await appendToChain(() => appendChainedRecord(params, walletHash));
   } catch (err) {
     // Do not let audit failures surface to callers.
     logger.error("audit: failed to persist audit event to DB", {
@@ -722,7 +754,15 @@ export async function recordAccessOrOwnershipChange(params: {
   result?: AuditResult;
   actor: string;
   target: string;
-  targetType: "prompt" | "user" | "role" | "permission" | "entitlement" | "policy_limit" | "system";
+  targetType:
+    | "prompt"
+    | "user"
+    | "role"
+    | "permission"
+    | "entitlement"
+    | "policy_limit"
+    | "system"
+    | "maintenance_banner";
   promptId?: string | null;
   walletAddress?: string | null;
   beforeState?: Record<string, unknown> | null;
