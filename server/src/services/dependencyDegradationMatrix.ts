@@ -575,3 +575,72 @@ export function getDegradationMatrixDefinition(
   const env: ProbeEnv = { ...defaultProbeEnv(), ...envOverride };
   return buildDegradationMatrix(env);
 }
+
+// ---------------------------------------------------------------------------
+// User-safe degraded mode helpers (#1013)
+// ---------------------------------------------------------------------------
+
+/**
+ * Looks up the user-safe message for a dependency failure mode (#1013).
+ * Returns a generic fallback if the dependency or mode is not in the matrix.
+ */
+export function getUserSafeMessage(
+  dependency: DependencyName,
+  failureMode: FailureMode,
+): string {
+  const env: ProbeEnv = { ...defaultProbeEnv() };
+  const matrix = buildDegradationMatrix(env);
+  const entry = matrix.find((e) => e.name === dependency);
+  if (!entry) return "A service is temporarily unavailable. Please try again shortly.";
+  const mode = entry.failureModes.find((m) => m.mode === failureMode);
+  return mode?.userMessage ?? "A service is temporarily unavailable. Please try again shortly.";
+}
+
+/**
+ * Returns the fallback behavior description for a dependency failure (#1013).
+ * Used by the API layer to decide how to degrade gracefully.
+ */
+export function getFallbackBehavior(
+  dependency: DependencyName,
+  failureMode: FailureMode,
+): string {
+  const env: ProbeEnv = { ...defaultProbeEnv() };
+  const matrix = buildDegradationMatrix(env);
+  const entry = matrix.find((e) => e.name === dependency);
+  if (!entry) return "Return a 503 with a generic retry message.";
+  const mode = entry.failureModes.find((m) => m.mode === failureMode);
+  return mode?.fallbackBehavior ?? "Return a 503 with a generic retry message.";
+}
+
+/**
+ * Returns the severity of a dependency failure (#1013).
+ * Critical failures should trigger circuit-breaker open; low severity can
+ * proceed with degraded UX.
+ */
+export function getFailureSeverity(
+  dependency: DependencyName,
+  failureMode: FailureMode,
+): ImpactSeverity {
+  const env: ProbeEnv = { ...defaultProbeEnv() };
+  const matrix = buildDegradationMatrix(env);
+  const entry = matrix.find((e) => e.name === dependency);
+  if (!entry) return "medium";
+  const mode = entry.failureModes.find((m) => m.mode === failureMode);
+  return mode?.severity ?? "medium";
+}
+
+/**
+ * Returns recovery steps for a dependency failure (#1013).
+ * Used by operational runbooks and on-call dashboards.
+ */
+export function getRecoverySteps(
+  dependency: DependencyName,
+  failureMode: FailureMode,
+): string[] {
+  const env: ProbeEnv = { ...defaultProbeEnv() };
+  const matrix = buildDegradationMatrix(env);
+  const entry = matrix.find((e) => e.name === dependency);
+  if (!entry) return ["Check service status pages.", "Retry after a short delay."];
+  const mode = entry.failureModes.find((m) => m.mode === failureMode);
+  return mode?.recoverySteps ?? ["Check service status pages.", "Retry after a short delay."];
+}
