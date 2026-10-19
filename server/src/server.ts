@@ -39,6 +39,9 @@ import { supportAccessRouter } from "./routes/supportAccessRoutes";
 import { payoutLedgerRouter } from "./routes/payoutLedgerRoutes";
 import { entitlementRouter } from "./routes/entitlementRoutes";
 import { bundleRouter } from "./routes/bundleRoutes";
+import { healthRouter } from "./routes/healthRoutes";
+import { allowListRouter } from "./routes/allowListRoutes";
+import { projectionReplayRouter } from "./routes/projectionReplayRoutes";
 import {
   GetOpenApiSchema,
   GetOpenApiExplorer,
@@ -65,6 +68,7 @@ const port = 5000;
 // Sentry error handler should be registered after routes (#332).
 app.use(express.json());
 
+app.use("/api/health", healthRouter); // #1027 dependency-aware public health
 app.use("/api/improve-proxy", proxyrouter);
 app.use("/api/prompts", promptRouter);
 app.use("/api/user", userRouter);
@@ -97,6 +101,8 @@ app.use("/api/exports", exportRouter)
 app.get("/api/openapi.json", GetOpenApiSchema);
 app.use("/api/admin/dr", drRouter);
 app.use("/api/admin/policy-limits", policyLimitRouter);
+app.use("/api/admin/allow-list", allowListRouter); // #1025
+app.use("/api/admin/projections", projectionReplayRouter); // #1024
 app.use("/api/recovery", operationRecoveryRouter);
 app.use("/api/receipts", receiptRouter);
 app.use("/api/admin/abuse-risk", abuseRiskRouter);

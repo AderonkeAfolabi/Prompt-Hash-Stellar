@@ -22,6 +22,13 @@ export const AUDIT_ACTIONS = [
   // admin access
   "admin_auth_success",
   "admin_auth_denied",
+  // administrative configuration changes (#1026)
+  "admin_config_change",
+  "admin_maintenance_change",
+  // projection rebuilds from the event journal (#1024)
+  "admin_projection_replay",
+  "admin_projection_activate",
+  "admin_projection_rollback",
   "audit_export",
   "audit_sensitive_field_access",
   "audit_sensitive_field_denied",

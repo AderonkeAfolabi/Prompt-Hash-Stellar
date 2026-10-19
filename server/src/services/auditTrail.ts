@@ -12,7 +12,7 @@ export { logger };
 export const AUDIT_INTEGRITY_VERSION = 2;
 
 const GENESIS_HASH = "0".repeat(64);
-const MAINTENANCE_TARGET_TYPE = "maintenance_banner";
+const MAINTENANCE_TARGET_TYPE = "maintenance_banner" as const;
 
 /**
  * Deterministic JSON serialization: object keys are sorted recursively and
@@ -722,7 +722,15 @@ export async function recordAccessOrOwnershipChange(params: {
   result?: AuditResult;
   actor: string;
   target: string;
-  targetType: "prompt" | "user" | "role" | "permission" | "entitlement" | "policy_limit" | "system";
+  targetType:
+    | "prompt"
+    | "user"
+    | "role"
+    | "permission"
+    | "entitlement"
+    | "policy_limit"
+    | "system"
+    | typeof MAINTENANCE_TARGET_TYPE;
   promptId?: string | null;
   walletAddress?: string | null;
   beforeState?: Record<string, unknown> | null;

@@ -1,9 +1,14 @@
-import express from "express";
+import express, { type Response } from "express";
 import {
   featureFlagService,
   KNOWN_FEATURE_FLAGS,
+  snapshotFlag,
 } from "../services/featureFlagService.js";
-import { requireAdminScope } from "../middleware/adminAuth.js";
+import { requireAdminScope, type AdminRequest } from "../middleware/adminAuth.js";
+import {
+  applyAuditedConfigChange,
+  AuditEvidenceUnavailableError,
+} from "../services/adminConfigAudit.js";
 
 export const featureFlagRouter = express.Router();
 
@@ -14,24 +19,72 @@ featureFlagRouter.get("/definitions", (_req, res) => {
   });
 });
 
-// Admin routes
+// Admin routes. Every mutation is applied through `applyAuditedConfigChange`
+// so it leaves hash-chained audit evidence or is rolled back (#1026).
+
+function auditContext(req: AdminRequest) {
+  const idempotencyKey = req.headers["idempotency-key"];
+  return {
+    actor: req.admin?.sub ?? "unknown-admin",
+    requestId: req.correlationId ?? req.requestId ?? null,
+    clientIp: String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "") || null,
+    changeId: typeof idempotencyKey === "string" && idempotencyKey ? idempotencyKey : null,
+    reason: typeof req.body?.reason === "string" ? req.body.reason.slice(0, 500) : null,
+  };
+}
+
+function sendChangeError(res: Response, err: any, fallbackStatus: number) {
+  if (err instanceof AuditEvidenceUnavailableError) {
+    res.setHeader("Retry-After", "30");
+    return res.status(503).json({
+      error: err.code,
+      message: err.message,
+      rolledBack: err.rolledBack,
+    });
+  }
+  return res.status(fallbackStatus).json({ error: err.message });
+}
+
+function definedOnly<T extends Record<string, unknown>>(input: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(input).filter(([, value]) => value !== undefined),
+  ) as Partial<T>;
+}
+
 featureFlagRouter.post(
   "/",
   requireAdminScope("flags:write"),
-  async (req, res) => {
+  async (req: AdminRequest, res: Response) => {
+    const { name, description, status, environments, rolloutPercentage } = req.body ?? {};
+    if (typeof name !== "string" || !name.trim()) {
+      return res.status(400).json({ error: "name is required." });
+    }
+    const ctx = auditContext(req);
     try {
-      const { name, description, status, environments, rolloutPercentage, createdBy } = req.body;
-      const flag = await featureFlagService.createFlag({
-        name,
-        description,
-        status,
-        environments,
-        rolloutPercentage,
-        createdBy,
+      const result = await applyAuditedConfigChange({
+        ...ctx,
+        configType: "feature_flag",
+        configKey: name.toLowerCase(),
+        operation: "create",
+        load: () => featureFlagService.getFlag(name),
+        apply: () =>
+          featureFlagService.createFlag({
+            name,
+            description,
+            status,
+            environments,
+            rolloutPercentage,
+            // The authenticated admin, never a client-supplied value.
+            createdBy: ctx.actor,
+          }),
+        restore: (before) =>
+          featureFlagService.restoreFlag(name, before ? snapshotFlag(before) : null),
+        snapshot: snapshotFlag,
       });
-      res.json(flag);
+      res.setHeader("X-Config-Change-Id", result.changeId);
+      return res.json(result.value);
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      return sendChangeError(res, err, 400);
     }
   }
 );
@@ -68,17 +121,29 @@ featureFlagRouter.get(
 featureFlagRouter.patch(
   "/:name",
   requireAdminScope("flags:write"),
-  async (req, res) => {
+  async (req: AdminRequest, res: Response) => {
+    const name = String(req.params.name);
+    const { status, environments, rolloutPercentage } = req.body ?? {};
     try {
-      const { status, environments, rolloutPercentage } = req.body;
-      const flag = await featureFlagService.updateFlag(req.params.name, {
-        status,
-        environments,
-        rolloutPercentage,
+      const result = await applyAuditedConfigChange({
+        ...auditContext(req),
+        configType: "feature_flag",
+        configKey: name.toLowerCase(),
+        operation: "update",
+        load: () => featureFlagService.getFlag(name),
+        apply: () =>
+          featureFlagService.updateFlag(
+            name,
+            definedOnly({ status, environments, rolloutPercentage }),
+          ),
+        restore: (before) =>
+          featureFlagService.restoreFlag(name, before ? snapshotFlag(before) : null),
+        snapshot: snapshotFlag,
       });
-      res.json(flag);
+      res.setHeader("X-Config-Change-Id", result.changeId);
+      return res.json(result.value);
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      return sendChangeError(res, err, 400);
     }
   }
 );
@@ -86,12 +151,27 @@ featureFlagRouter.patch(
 featureFlagRouter.delete(
   "/:name",
   requireAdminScope("flags:write"),
-  async (req, res) => {
+  async (req: AdminRequest, res: Response) => {
+    const name = String(req.params.name);
     try {
-      await featureFlagService.deleteFlag(req.params.name);
-      res.json({ success: true });
+      const result = await applyAuditedConfigChange({
+        ...auditContext(req),
+        configType: "feature_flag",
+        configKey: name.toLowerCase(),
+        operation: "delete",
+        load: () => featureFlagService.getFlag(name),
+        apply: async () => {
+          await featureFlagService.deleteFlag(name);
+          return null;
+        },
+        restore: (before) =>
+          featureFlagService.restoreFlag(name, before ? snapshotFlag(before) : null),
+        snapshot: snapshotFlag,
+      });
+      res.setHeader("X-Config-Change-Id", result.changeId);
+      return res.json({ success: true });
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      return sendChangeError(res, err, 400);
     }
   }
 );

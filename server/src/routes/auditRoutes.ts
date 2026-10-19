@@ -14,6 +14,7 @@ import {
   queryAccessAuditLogs,
   exportAccessAuditLogs,
 } from "../services/auditTrail";
+import { queryConfigChangeEvidence } from "../services/adminConfigAudit";
 
 /**
  * Audit-grade admin activity export (#783).
@@ -221,3 +222,53 @@ auditRouter.get(
   },
 );
 
+
+/**
+ * GET /api/audit/config-changes
+ * Evidence for administrative configuration changes (#1026): who changed
+ * which config, from what to what, and under which change id. Filters:
+ * configType, configKey (requires configType), actor, changeId, since, until,
+ * limit (1-200).
+ */
+auditRouter.get(
+  "/config-changes",
+  requireAdminScope("audit:export"),
+  async (req: AdminRequest, res: Response) => {
+    markPrivate(res);
+    const { configType, configKey, actor, changeId, since, until, limit } = req.query;
+
+    if (configType !== undefined && configType !== "feature_flag") {
+      return res.status(400).json({ error: "configType must be one of: feature_flag" });
+    }
+    if (configKey !== undefined && configType === undefined) {
+      return res.status(400).json({ error: "configKey requires configType." });
+    }
+    const parsedSince = parseDate(since);
+    const parsedUntil = parseDate(until);
+    if (parsedSince === null || parsedUntil === null) {
+      return res.status(400).json({ error: "since and until must be valid dates." });
+    }
+    const parsedLimit = limit === undefined ? 50 : Number(limit);
+    if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 200) {
+      return res.status(400).json({ error: "limit must be an integer between 1 and 200." });
+    }
+
+    try {
+      await connectDb();
+      const records = await queryConfigChangeEvidence({
+        configType: configType as "feature_flag" | undefined,
+        configKey: configKey ? String(configKey).toLowerCase() : undefined,
+        actor: actor ? String(actor) : undefined,
+        changeId: changeId ? String(changeId) : undefined,
+        since: parsedSince ?? undefined,
+        until: parsedUntil ?? undefined,
+        limit: parsedLimit,
+      });
+      return res.json({ success: true, count: records.length, records });
+    } catch (err) {
+      return res.status(500).json({
+        error: (err as Error).message || "Failed to query configuration change evidence",
+      });
+    }
+  },
+);

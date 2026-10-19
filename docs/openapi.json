@@ -17,6 +17,10 @@
   ],
   "tags": [
     {
+      "name": "Admin Operations",
+      "description": "Admin-only configuration evidence, allow-list policy and projection replay tooling"
+    },
+    {
       "name": "Prompts",
       "description": "Indexed prompt listings (read-projection of on-chain state)"
     },
@@ -66,6 +70,538 @@
     }
   ],
   "paths": {
+    "/api/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Dependency-aware public health",
+        "description": "Redacted readiness view (#1027). 200 when ok or degraded; 503 with Retry-After when a critical dependency (database) is down. Results are cached for a few seconds and evaluated single-flight; public callers cannot force a fresh probe.",
+        "operationId": "getPublicHealth",
+        "responses": {
+          "200": {
+            "description": "ok or degraded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicHealth"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A critical dependency is down",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicHealth"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health/live": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Liveness",
+        "description": "Process liveness only; never touches a dependency (#1027).",
+        "operationId": "getLiveness",
+        "responses": {
+          "200": {
+            "description": "Serving",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok"
+                      ]
+                    },
+                    "uptimeSeconds": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health/details": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Full dependency health report (admin)",
+        "description": "Requires the `health:read` admin scope. Includes raw error detail, attempts and observed values. `refresh=true` bypasses the cache.",
+        "operationId": "getHealthDetails",
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "refresh",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok or degraded"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "description": "A critical dependency is down"
+          }
+        }
+      }
+    },
+    "/api/audit/config-changes": {
+      "get": {
+        "tags": [
+          "Admin Operations"
+        ],
+        "summary": "Administrative configuration change evidence",
+        "description": "Requires `audit:export` (#1026). Newest first. Each record carries actor, before/after state, changed fields, change id and its hash-chain links.",
+        "operationId": "listConfigChangeEvidence",
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "configType",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "feature_flag"
+              ]
+            }
+          },
+          {
+            "name": "configKey",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Requires configType."
+          },
+          {
+            "name": "actor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "changeId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evidence records"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/admin/allow-list": {
+      "get": {
+        "tags": [
+          "Admin Operations"
+        ],
+        "summary": "Effective allow-list policies",
+        "description": "Requires `allowlist:read` (#1025).",
+        "operationId": "getAllowListPolicies",
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Mode, URL policies and file-type allow-list"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/admin/allow-list/check": {
+      "post": {
+        "tags": [
+          "Admin Operations"
+        ],
+        "summary": "Dry-run a URL or file against the allow-list",
+        "description": "Requires `allowlist:read` (#1025). Always reports what enforce mode would decide.",
+        "operationId": "checkAllowList",
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "policy": {
+                    "type": "string",
+                    "enum": [
+                      "webhook_destination",
+                      "listing_image",
+                      "report_evidence"
+                    ]
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "expectedKind": {
+                    "type": "string",
+                    "enum": [
+                      "image",
+                      "pdf",
+                      "json",
+                      "csv",
+                      "text"
+                    ]
+                  },
+                  "file": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string"
+                      },
+                      "filename": {
+                        "type": "string"
+                      },
+                      "contentType": {
+                        "type": "string"
+                      },
+                      "base64Prefix": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Decision: allowed, code, message"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/admin/projections": {
+      "get": {
+        "tags": [
+          "Admin Operations"
+        ],
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "List replayable projections and their active run",
+        "operationId": "listProjections",
+        "description": "Requires `projections:read` (#1024).",
+        "responses": {
+          "200": {
+            "description": "Projections"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/admin/projections/{name}/replays": {
+      "post": {
+        "tags": [
+          "Admin Operations"
+        ],
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Start a projection replay",
+        "operationId": "startProjectionReplay",
+        "description": "Requires `projections:write` (#1024). Runs in the background; poll the run.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "build",
+                      "dry_run"
+                    ],
+                    "default": "build"
+                  },
+                  "strict": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "batchSize": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5000
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Run created"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/admin/projections/runs/{runId}": {
+      "get": {
+        "tags": [
+          "Admin Operations"
+        ],
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Get a replay run",
+        "operationId": "getProjectionRun",
+        "description": "Requires `projections:read`.",
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run status, checkpoint and counters"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/admin/projections/runs/{runId}/resume": {
+      "post": {
+        "tags": [
+          "Admin Operations"
+        ],
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Resume a failed or abandoned run from its checkpoint",
+        "operationId": "resumeProjectionRun",
+        "description": "Requires `projections:write`.",
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Resuming"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "Run already completed"
+          }
+        }
+      }
+    },
+    "/api/admin/projections/runs/{runId}/activate": {
+      "post": {
+        "tags": [
+          "Admin Operations"
+        ],
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Serve a completed build run",
+        "operationId": "activateProjectionRun",
+        "description": "Requires `projections:write`. Refused for dry runs, incomplete runs and runs that skipped unsupported events.",
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated pointer"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "Run not activatable"
+          }
+        }
+      }
+    },
+    "/api/admin/projections/{name}/rollback": {
+      "post": {
+        "tags": [
+          "Admin Operations"
+        ],
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "summary": "Re-activate the previously served run",
+        "operationId": "rollbackProjection",
+        "description": "Requires `projections:write`.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated pointer"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "description": "Nothing to roll back to"
+          }
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": [
@@ -3121,6 +3657,67 @@
       }
     },
     "schemas": {
+      "PublicHealthDependency": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "example": "database"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "up",
+              "degraded",
+              "down"
+            ]
+          },
+          "critical": {
+            "type": "boolean"
+          },
+          "latencyMs": {
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "timeout",
+              "unreachable",
+              "http_error",
+              "unhealthy",
+              "check_failed"
+            ],
+            "description": "Present only when status is not up. Raw error text is never published."
+          }
+        }
+      },
+      "PublicHealth": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "down"
+            ]
+          },
+          "checkedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "cached": {
+            "type": "boolean",
+            "description": "True when served from the short-TTL cache (HEALTH_CACHE_TTL_MS)."
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicHealthDependency"
+            }
+          }
+        }
+      },
     "LicenseTemplate": {
       "type": "object",
       "properties": {
