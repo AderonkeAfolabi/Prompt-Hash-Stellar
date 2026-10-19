@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Reliability and evidence hardening (Issues #1008, #1009, #1010, #1011)
+- Deterministic replay verification (#1008): a pure replay fold that orders
+  events by `(ledger, eventId)`, collapses retries, rejects conflicting event
+  ids, skips already-persisted stale rows, and verifies journal/reverse/
+  seeded-shuffle/retry-storm histories produce one projection fingerprint.
+  See `docs/operations/deterministic-replay.md`.
+- Queue backpressure (#1009): per-type admission ceilings over pending +
+  processing jobs, env overrides, idempotent retry bypass, `429` +
+  `Retry-After`, and `GET /api/jobs/pressure`. Settlement and repairs keep
+  generous ceilings; exports and analytics are tighter. See
+  `docs/operations/queue-backpressure.md`.
+- Prompt schema migration compatibility gate (#1010): a read-only checker and
+  `npm run schema:compat` CLI that build v3 candidates, block ambiguous
+  `price` conversions and alias conflicts, and emit deterministic fingerprints
+  plus migration/rollback plans. See
+  `docs/operations/schema-migration-compatibility.md`.
+- External evidence verification (#1011): Ed25519 envelopes with a trusted-key
+  registry, payload-hash and timestamp checks, issuer/scope authorization,
+  idempotent `evidenceId` retries, nonce-reuse and conflict detection,
+  Mongo-backed replay storage, and admin-scoped import/read routes. See
+  `docs/operations/external-evidence-verification.md`.
+
 #### Operational hardening (Issues #1024, #1025, #1026, #1027)
 - Versioned event replay (#1024): an append-only `EventJournal` written by the
   indexer, a replay engine that rebuilds projections into isolated,
