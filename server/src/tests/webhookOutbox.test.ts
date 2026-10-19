@@ -70,6 +70,7 @@ describe("webhookOutbox.enqueue", () => {
       _id: "sub-1",
       nextDeliverySequence: 2,
     });
+    (WebhookOutboxEvent.findOne as any).mockResolvedValueOnce(null).mockResolvedValueOnce({ _id: "winner" });
     const dup = new Error("duplicate") as any;
     dup.code = 11000;
     (WebhookOutboxEvent.create as any).mockRejectedValueOnce(dup);
@@ -260,7 +261,7 @@ describe("webhookOutboxWorker.deliverRow", () => {
       "row-1",
       expect.objectContaining({ $set: expect.objectContaining({ attempts: 1 }) }),
     );
-    const call = (WebhookOutboxEvent.findByIdAndUpdate as any).mock.calls[0][1];
+    const call = (WebhookOutboxEvent.findByIdAndUpdate as any).mock.calls.find((call: any[]) => call[1].$set?.nextAttemptAt)[1];
     expect(call.$set.status).toBeUndefined();
   });
 
@@ -300,7 +301,7 @@ describe("webhookOutboxWorker.deliverRow", () => {
     const before = Date.now();
     await deliverRow(baseRow() as any);
 
-    const call = (WebhookOutboxEvent.findByIdAndUpdate as any).mock.calls[0][1];
+    const call = (WebhookOutboxEvent.findByIdAndUpdate as any).mock.calls.find((call: any[]) => call[1].$set?.nextAttemptAt)[1];
     const scheduledDelay = call.$set.nextAttemptAt.getTime() - before;
     expect(scheduledDelay).toBeGreaterThanOrEqual(4_500);
     expect(scheduledDelay).toBeLessThanOrEqual(6_000);

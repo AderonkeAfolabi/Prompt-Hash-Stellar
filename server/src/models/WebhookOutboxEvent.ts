@@ -31,6 +31,8 @@ const webhookOutboxEventSchema = new mongoose.Schema(
     leaseHolder: { type: String, default: null },
     leaseExpiresAt: { type: Date, default: null },
     lastError: { type: String, default: null },
+    deliveryCheckpoint: { type: String, enum: ["prepared", "acknowledged"], default: null },
+    responseStatus: Number,
     deliveredAt: { type: Date, default: null },
     deadLetteredAt: { type: Date, default: null },
   },

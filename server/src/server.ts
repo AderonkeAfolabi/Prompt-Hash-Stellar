@@ -1,3 +1,4 @@
+import { transferRouter } from "./routes/transferRoutes";
 import express, { type Application, type ErrorRequestHandler } from "express";
 import * as Sentry from "@sentry/node";
 import { proxyrouter } from "./routes/proxyRoutes";
@@ -93,6 +94,7 @@ app.use("/api/admin/dependency-health", dependencyHealthRouter);
 app.use("/api/maintenance", maintenanceBannerRouter); // Maintenance mode banners
 // Export routes for user-owned data (requires authentication)
 // Machine-readable API schema + interactive explorer (#713).
+app.use("/api/transfers", transferRouter);
 app.use("/api/exports", exportRouter)
 app.get("/api/openapi.json", GetOpenApiSchema);
 app.use("/api/admin/dr", drRouter);

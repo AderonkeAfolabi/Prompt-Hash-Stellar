@@ -57,11 +57,14 @@ export const MANDATORY_NOTIFICATION_TYPES: NotificationType[] = [
   "support_access_notice",
 ];
 
-export const OPTIONAL_NOTIFICATION_TYPES: NotificationType[] = NOTIFICATION_TYPES.filter(
-  (type) => !MANDATORY_NOTIFICATION_TYPES.includes(type),
-);
+export const OPTIONAL_NOTIFICATION_TYPES: NotificationType[] =
+  NOTIFICATION_TYPES.filter(
+    (type) => !MANDATORY_NOTIFICATION_TYPES.includes(type),
+  );
 
-export function isMandatoryNotificationType(type: string): type is NotificationType {
+export function isMandatoryNotificationType(
+  type: string,
+): type is NotificationType {
   return (MANDATORY_NOTIFICATION_TYPES as string[]).includes(type);
 }
 
@@ -71,6 +74,7 @@ const notificationSchema = new mongoose.Schema(
       type: String,
       required: true,
       lowercase: true,
+      trim: true,
       index: true,
     },
     // Prompt context is optional so lifecycle/security alerts that are not
@@ -78,7 +82,7 @@ const notificationSchema = new mongoose.Schema(
     // `prompt_update` writers still populate all three fields.
     promptId: {
       type: String,
-      default: "",
+      default: null,
       index: true,
     },
     promptTitle: {
@@ -99,16 +103,6 @@ const notificationSchema = new mongoose.Schema(
     deepLink: {
       type: String,
       default: null,
-    },
-    // Stable reference IDs (never raw addresses, keys, or amounts).
-    promptId: {
-      type: String,
-      default: null,
-      index: true,
-    },
-    promptTitle: {
-      type: String,
-      default: "",
     },
     // Type-specific supplemental fields (read-only, non-sensitive).
     versionIndex: {
@@ -132,6 +126,12 @@ const notificationSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    idempotencyKey: { type: String },
+    sourceEventId: String,
+    deliveryStatus: String,
+    attempts: Number,
+    lastError: String,
+    deliveredAt: Date,
     read: {
       type: Boolean,
       default: false,
@@ -144,9 +144,19 @@ const notificationSchema = new mongoose.Schema(
 // Compound indexes for the notification center queries.
 notificationSchema.index({ recipientWallet: 1, read: 1, createdAt: -1 });
 notificationSchema.index(
-  { dedupeKey: 1 },
+  { recipientWallet: 1, type: 1, dedupeKey: 1 },
   { unique: true, partialFilterExpression: { dedupeKey: { $type: "string" } } },
 );
 
+notificationSchema.index(
+  { recipientWallet: 1, type: 1, idempotencyKey: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { idempotencyKey: { $type: "string" } },
+  },
+);
+notificationSchema.index({ createdAt: 1 }, { expireAfterSeconds: 90 * 86400 });
+const Notification =
+  mongoose.models.Notification ||
+  mongoose.model("Notification", notificationSchema);
 export default Notification;
-export { NOTIFICATION_TYPES, notificationPreferencesSchema };

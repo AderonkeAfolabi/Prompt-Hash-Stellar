@@ -47,7 +47,7 @@ async function archiveEligible(
   // excluded from every query below, independent of their per-record flag.
   const heldIds = options.heldIds ?? [];
   const heldGuard = heldIds.length > 0 ? { _id: { $nin: heldIds } } : {};
-  const eligibleFilter = { ...filter, ...heldGuard };
+  const eligibleFilter = { ...filter, ...heldGuard, retentionHold: { $ne: true }, archivedAt: null };
 
   const eligible = await model.countDocuments({
     ...eligibleFilter,

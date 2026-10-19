@@ -394,7 +394,7 @@ provenanceRecordSchema.statics.getImportStats = async function (params: {
 /**
  * Pre-save hook: Validate parent-child consistency.
  */
-provenanceRecordSchema.pre("save", async function (next) {
+provenanceRecordSchema.pre("save", async function () {
   // Ensure sourcePromptId is set if parentProvenanceId is set
   if (this.parentProvenanceId && !this.sourcePromptId) {
     const parent = await ProvenanceRecord.findById(this.parentProvenanceId);
@@ -403,7 +403,6 @@ provenanceRecordSchema.pre("save", async function (next) {
     }
   }
   
-  next();
 });
 
 const ProvenanceRecord =

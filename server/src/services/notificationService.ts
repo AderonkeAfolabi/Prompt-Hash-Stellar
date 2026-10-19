@@ -1,4 +1,4 @@
-import Notification, { NotificationType } from '../models/Notification';
+import Notification, { NotificationType } from "../models/Notification";
 
 export interface CreateNotificationOptions {
   recipientWallet: string;
@@ -14,34 +14,24 @@ export interface CreateNotificationOptions {
 
 export class NotificationService {
   static async createNotification(options: CreateNotificationOptions) {
+    const recipientWallet = options.recipientWallet.trim().toLowerCase();
+    const key = options.idempotencyKey?.trim();
+    if (!recipientWallet || (options.idempotencyKey !== undefined && !key)) {
+      throw new Error("Recipient and non-empty idempotency key required");
+    }
+    const filter = { recipientWallet, type: options.type, idempotencyKey: key };
     try {
-      if (options.idempotencyKey) {
-        const existing = await Notification.findOne({
-          recipientWallet: options.recipientWallet,
-          idempotencyKey: options.idempotencyKey,
-        });
-
-        if (existing) {
-          return existing;
-        }
-      }
-
-      const notification = new Notification({
-        recipientWallet: options.recipientWallet,
-        type: options.type,
-        message: options.message,
-        deepLink: options.deepLink,
-        promptId: options.promptId,
-        promptTitle: options.promptTitle,
-        idempotencyKey: options.idempotencyKey,
-        versionIndex: options.versionIndex,
-        changeNote: options.changeNote,
+      return await Notification.create({
+        ...options,
+        recipientWallet,
+        ...(key ? { idempotencyKey: key } : {}),
         read: false,
       });
-
-      return await notification.save();
     } catch (error) {
-      console.error('Error creating notification:', error);
+      if (key && (error as { code?: number }).code === 11000) {
+        const existing = await Notification.findOne(filter);
+        if (existing) return existing;
+      }
       throw error;
     }
   }
@@ -50,7 +40,7 @@ export class NotificationService {
     return await Notification.findByIdAndUpdate(
       notificationId,
       { read: true },
-      { new: true }
+      { new: true },
     );
   }
 
@@ -58,14 +48,14 @@ export class NotificationService {
     return await Notification.findByIdAndUpdate(
       notificationId,
       { read: false },
-      { new: true }
+      { new: true },
     );
   }
 
   static async markAllAsRead(recipientWallet: string) {
     return await Notification.updateMany(
       { recipientWallet, read: false },
-      { read: true }
+      { read: true },
     );
   }
 
@@ -83,7 +73,7 @@ export class NotificationService {
       skip?: number;
       type?: NotificationType;
       unreadOnly?: boolean;
-    } = {}
+    } = {},
   ) {
     const { limit = 20, skip = 0, type, unreadOnly = false } = options;
 
@@ -128,7 +118,7 @@ export class NotificationService {
   }
 
   static async sendBulkNotifications(
-    notifications: CreateNotificationOptions[]
+    notifications: CreateNotificationOptions[],
   ) {
     const results = [];
 
@@ -147,7 +137,7 @@ export class NotificationService {
   static async getNotificationsByType(
     recipientWallet: string,
     type: NotificationType,
-    limit: number = 10
+    limit: number = 10,
   ) {
     return await Notification.find({
       recipientWallet,

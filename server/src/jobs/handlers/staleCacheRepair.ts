@@ -5,9 +5,9 @@
  * entries so they are repopulated from source on next read. Safe to rerun.
  */
 import type { JobRecordDTO } from "../types";
-import { detectStaleCache, buildPromptSourceVersions } from "../services/staleCacheService";
-import { cacheDel, CACHE_KEYS } from "../services/cacheService";
-import { logger } from "../services/structuredLogger";
+import { detectStaleCache, buildPromptSourceVersions } from "../../services/staleCacheService";
+import { cacheDel, CACHE_KEYS } from "../../services/cacheService";
+import { logger } from "../../services/structuredLogger";
 
 export interface StaleCacheRepairPayload {
   version: 1;

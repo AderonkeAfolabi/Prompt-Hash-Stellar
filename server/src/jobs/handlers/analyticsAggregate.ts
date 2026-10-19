@@ -4,9 +4,9 @@
  * windows from source events; safe to rerun. (Issue #876)
  */
 import type { JobRecordDTO } from "../types";
-import { aggregateTrends, persistTrendMetrics, buildDailyTrendWindow } from "../services/trendAggregationService";
-import Purchase from "../models/Purchase";
-import Prompt from "../models/Prompt";
+import { aggregateTrends, persistTrendMetrics, buildDailyTrendWindow } from "../../services/trendAggregationService";
+import Purchase from "../../models/Purchase";
+import Prompt from "../../models/Prompt";
 
 export interface AnalyticsAggregatePayload {
   version: 1;

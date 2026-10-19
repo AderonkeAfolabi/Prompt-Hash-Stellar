@@ -138,6 +138,11 @@ async function scheduleRetry(rowId: unknown, attempts: number, delayMs: number, 
 
 /** Exported for tests — delivers one already-claimed row. */
 export async function deliverRow(row: InstanceType<typeof WebhookOutboxEvent>): Promise<void> {
+  if (row.status === "delivered") return;
+  if (row.deliveryCheckpoint === "acknowledged") {
+    await markDelivered(row._id, row.subscriptionId);
+    return;
+  }
   const sub = await WebhookSubscription.findById(row.subscriptionId);
   if (!sub) {
     await markDeadLetter(row._id, row.subscriptionId, "Subscription no longer exists.");
@@ -166,6 +171,10 @@ export async function deliverRow(row: InstanceType<typeof WebhookOutboxEvent>): 
     }
   }
 
+  if (row.attempts >= MAX_ATTEMPTS) {
+    await markDeadLetter(row._id, row.subscriptionId, "Attempt budget exhausted; reconcile ambiguous delivery before replay.");
+    return;
+  }
   const attempt = row.attempts + 1;
   const timestamp = new Date().toISOString();
   const eventId = row.eventId ?? row.dedupeKey;
@@ -193,10 +202,18 @@ export async function deliverRow(row: InstanceType<typeof WebhookOutboxEvent>): 
     "X-PromptHash-Event": row.event,
   };
 
+  // Persist intent and consume an attempt BEFORE crossing the network boundary.
+  // A lost response remains ambiguous; retries keep the same deliveryId.
+  await WebhookOutboxEvent.findByIdAndUpdate(row._id, {
+    $set: { deliveryCheckpoint: "prepared", attempts: attempt },
+  });
   try {
     const result = await postSignedWebhook(sub.url, headers, body, DELIVERY_TIMEOUT_MS);
 
     if (result.status >= 200 && result.status < 300) {
+      await WebhookOutboxEvent.findByIdAndUpdate(row._id, {
+        $set: { deliveryCheckpoint: "acknowledged", responseStatus: result.status },
+      });
       await markDelivered(row._id, row.subscriptionId);
       return;
     }
