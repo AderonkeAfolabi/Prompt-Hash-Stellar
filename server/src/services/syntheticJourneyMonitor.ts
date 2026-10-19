@@ -32,6 +32,8 @@ export interface SyntheticJourneyResult {
   totalDurationMs: number;
   steps: SyntheticStep[];
   failedStep?: SyntheticStep["name"];
+  /** Correlation ID for tracing this run across logs and alerting pipelines (#917). */
+  correlationId: string;
 }
 
 export interface SyntheticMonitorDependencies {
@@ -156,6 +158,7 @@ export async function runSyntheticJourney(
   const retryBaseMs = Math.max(0, config.retryBaseMs ?? 250);
   const baseUrl = config.baseUrl.replace(/\/$/, "");
   const startedAt = now();
+  const correlationId = `synth_${startedAt}_${Math.random().toString(36).slice(2, 10)}`;
   const idempotencyKey = `synthetic:${config.promptId}:${config.mode}:${startedAt}`;
   const steps: SyntheticStep[] = [];
   let challengeBody: { token: string; challenge: string } | undefined;
@@ -285,6 +288,7 @@ export async function runSyntheticJourney(
     mode: config.mode,
     totalDurationMs: now() - startedAt,
     steps,
+    correlationId,
     ...(failed ? { failedStep: failed.name } : {}),
   };
 }
