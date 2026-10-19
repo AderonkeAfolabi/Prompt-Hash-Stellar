@@ -30,6 +30,11 @@ vi.mock("../models/Purchase", () => ({
   },
 }));
 
+// The event journal (#1024) is a real Mongo write; these suites run without a DB.
+vi.mock("../services/eventJournal", () => ({
+  journalIndexedEvent: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("../services/webhookOutbox", () => ({
   enqueue: vi.fn().mockResolvedValue(undefined),
 }));

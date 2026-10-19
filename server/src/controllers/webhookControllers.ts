@@ -3,6 +3,7 @@ import { randomBytes } from "crypto";
 import connectDb from "../db/connectDb";
 import WebhookSubscription from "../models/WebhookSubscription";
 import { listDeadLetters, replayDeadLetter, rotateSigningKey } from "../services/webhookOutbox";
+import { enforceUrlAllowList } from "../services/allowListPolicy";
 
 export const RegisterWebhook = async (req: Request, res: Response): Promise<Response> => {
   try {
@@ -13,10 +14,13 @@ export const RegisterWebhook = async (req: Request, res: Response): Promise<Resp
       return res.status(400).json({ error: "walletAddress and url are required." });
     }
 
-    try {
-      new URL(url);
-    } catch {
-      return res.status(400).json({ error: "url must be a valid URL." });
+    // Strict destination allow-list (#1025): refuse internal, IP-literal,
+    // non-https or non-allow-listed targets before they are ever stored.
+    const destination = enforceUrlAllowList(url, "webhook_destination", {
+      context: "webhook_registration",
+    });
+    if (!destination.allowed) {
+      return res.status(400).json({ error: destination.message, code: destination.code });
     }
 
     const secret = randomBytes(32).toString("hex");

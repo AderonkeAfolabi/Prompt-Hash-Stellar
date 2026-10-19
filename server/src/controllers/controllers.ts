@@ -8,6 +8,7 @@ import Purchase from "../models/Purchase.js";
 import { streamText } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { validateListingMetadata } from "../services/listingValidation.js";
+import { enforceEvidenceUrl } from "../services/allowListPolicy.js";
 import {
   cacheGet,
   cacheSet,
@@ -459,6 +460,18 @@ export const SubmitPromptReport = async (
           }))
           .filter((item: { url: string }) => item.url.length > 0)
       : [];
+
+    // Strict allow-list (#1025): evidence links must be public http(s) URLs
+    // whose file type matches the declared kind.
+    for (const [index, item] of evidenceItems.entries()) {
+      const decision = enforceEvidenceUrl(item.url, item.kind);
+      if (!decision.allowed) {
+        return res.status(400).json({
+          error: `evidence[${index}]: ${decision.message}`,
+          code: decision.code,
+        });
+      }
+    }
 
     const newReport = new Report({
       promptId,

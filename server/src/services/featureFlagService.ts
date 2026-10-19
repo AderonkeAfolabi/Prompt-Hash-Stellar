@@ -93,6 +93,32 @@ export interface FlagEvaluationResult {
   source: "database" | "default_fallback" | "safe_fallback";
 }
 
+/** The audited, restorable view of a stored flag (#1026). */
+export type FlagSnapshot = {
+  name: string;
+  description: string;
+  status: FeatureFlagStatus;
+  environments: Partial<Record<FeatureFlagEnvironment, boolean>>;
+  rolloutPercentage: number;
+  createdBy: string;
+};
+
+export function snapshotFlag(flag: any): FlagSnapshot {
+  const environments = flag.environments ?? {};
+  return {
+    name: flag.name,
+    description: flag.description,
+    status: flag.status,
+    environments: {
+      development: Boolean(environments.development),
+      staging: Boolean(environments.staging),
+      production: Boolean(environments.production),
+    },
+    rolloutPercentage: Number(flag.rolloutPercentage ?? 0),
+    createdBy: flag.createdBy,
+  };
+}
+
 class FeatureFlagService {
   getSafeFallback(flagName: string): boolean {
     const normalized = flagName.toLowerCase();
@@ -140,6 +166,24 @@ class FeatureFlagService {
     }
 
     logger.info(`Feature flag deleted: ${name}`);
+  }
+
+  /**
+   * Put a flag back exactly as captured by `snapshotFlag` — or remove it when
+   * it did not exist (`null`). Used to roll back a change whose audit
+   * evidence could not be recorded (#1026).
+   */
+  async restoreFlag(name: string, snapshot: FlagSnapshot | null): Promise<void> {
+    const normalized = name.toLowerCase();
+    if (!snapshot) {
+      await FeatureFlag.deleteOne({ name: normalized });
+      return;
+    }
+    await FeatureFlag.findOneAndUpdate(
+      { name: normalized },
+      { $set: { ...snapshot, name: normalized } },
+      { upsert: true },
+    );
   }
 
   async isEnabled(

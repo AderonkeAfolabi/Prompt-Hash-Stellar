@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Operational hardening (Issues #1024, #1025, #1026, #1027)
+- Versioned event replay (#1024): an append-only `EventJournal` written by the
+  indexer, a replay engine that rebuilds projections into isolated,
+  resumable runs with event-schema version gating, activation/rollback via a
+  projection pointer, admin routes under `/api/admin/projections`, and a
+  `projections:replay` CLI with chain backfill. See
+  `docs/operations/event-replay.md`.
+- Strict allow-list validation (#1025) for webhook destinations, listing
+  image URLs and report evidence URLs, plus extension/MIME/magic-byte file
+  type checks, with `ALLOWLIST_MODE=report` as a rollback lever. See
+  `docs/operations/allow-list-validation.md`.
+- Audit evidence for admin configuration changes (#1026): feature flag
+  create/update/delete write `admin_config_change` records with before/after
+  state, or are rolled back when evidence cannot be recorded; queryable at
+  `GET /api/audit/config-changes`. See `docs/operations/admin-config-audit.md`.
+- Dependency-aware public health (#1027): `/api/health`, `/api/health/live`
+  and admin `/api/health/details` with timeouts, retry, caching and redacted
+  public output. See `docs/operations/public-health-endpoint.md`.
+- Fixed: the indexer referenced an undefined `getEventDecoder`, so every
+  event was quarantined as `decoder_error`; and `admin_maintenance_change`
+  audit records were rejected by the `AuditLog` schema enum.
+
 #### Prompt Lifecycle State Machine (Issue #786)
 - New explicit lifecycle states — `draft`, `review`, `published`, `hidden`,
   `suspended`, `archived` — replacing scattered `listingStatus`/

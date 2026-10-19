@@ -1,4 +1,5 @@
 import { PROMPT_CATEGORIES, PROMPT_METADATA_LIMITS } from "@prompthash/schema";
+import { enforceUrlAllowList } from "./allowListPolicy";
 
 const CATEGORY_ALIASES: Record<string, string> = Object.fromEntries(
   PROMPT_CATEGORIES.map((category: string) => [category.toLowerCase(), category]),
@@ -85,6 +86,13 @@ export function validateListingMetadata(
     errors.image = `Image URL must be ${LISTING_LIMITS.image} characters or fewer.`;
   } else if (!/^https?:\/\/.+/i.test(normalized.image)) {
     errors.image = "Image URL must start with http:// or https://.";
+  } else {
+    // Strict allow-list (#1025): public host, raster image type only.
+    const decision = enforceUrlAllowList(normalized.image, "listing_image", {
+      expectedKind: "image",
+      context: "listing_metadata",
+    });
+    if (!decision.allowed) errors.image = decision.message ?? "Image URL is not allowed.";
   }
 
   if (!normalized.title) {

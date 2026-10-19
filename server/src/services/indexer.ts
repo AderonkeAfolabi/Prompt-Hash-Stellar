@@ -24,12 +24,20 @@ import { decodeEvent } from "@prompthash/sdk";
 import { logger } from "./structuredLogger";
 import { applyDisputeTransition } from "./purchaseDisputes";
 import { trackBlockchainIndexing } from "../middleware/provenanceMiddleware";
+import { journalIndexedEvent } from "./eventJournal";
 
 const POLL_INTERVAL_MS = 5_000;
 const LEASE_TTL_MS = 30_000; // lease expires after 30 s of inactivity
 const REPLICA_ID = `${process.pid}@${os.hostname()}`;
 
 let tickInFlight = false; // single-flight guard for the current process
+
+// `processEvent` and `replayQuarantinedEvents` resolve the decoder through
+// this seam; it was referenced but never defined, so every event failed as a
+// decoder_error (#1024).
+async function getEventDecoder(): Promise<typeof decodeEvent> {
+  return decodeEvent;
+}
 
 // Entitlement decision cache — invalidated on settlement events (#545, #602).
 // Uses Redis for multi-instance deployments; short TTL balances freshness with RPC load.
@@ -294,7 +302,19 @@ export async function processEvent(event: StellarRpc.Api.EventResponse): Promise
     return;
   }
 
-  // 4. Route decoded event to database projections
+  // 4. Journal the decoded event so projections can be rebuilt by replay
+  //    (#1024). Best effort: failures are logged for a targeted backfill.
+  await journalIndexedEvent({
+    eventId: event.id,
+    ledger: event.ledger,
+    txHash: txHash || "",
+    contractId: String(event.contractId ?? ""),
+    eventType: decoded.type,
+    eventVersion: decoded.version,
+    payload: decoded.data as Record<string, unknown>,
+  });
+
+  // 5. Route decoded event to database projections
   try {
     await routeDecodedEvent(
       decoded.type,
@@ -852,6 +872,15 @@ export async function replayQuarantinedEvents(options: { maxEvents?: number } = 
     try {
       const decoded = decodeFn(item.topic, item.rawValue);
       if (decoded.recognized) {
+        await journalIndexedEvent({
+          eventId: item.eventId,
+          ledger: item.ledger,
+          txHash: item.txHash,
+          contractId: item.contractId,
+          eventType: decoded.type,
+          eventVersion: decoded.version,
+          payload: decoded.data as Record<string, unknown>,
+        });
         await routeDecodedEvent(
           decoded.type,
           decoded.data as Record<string, any>,
