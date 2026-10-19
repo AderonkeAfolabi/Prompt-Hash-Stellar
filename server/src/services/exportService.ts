@@ -57,7 +57,7 @@ async function isAuthorizedForExport(
  * Build a privacy-safe export record for a prompt.
  * Wallet addresses are hashed; raw sensitive data is excluded.
  */
-function buildExportPrompt(prompt: any): any {
+function buildExportPrompt(prompt: any, isSelfExport: boolean): any {
   return {
     _id: prompt._id,
     onChainId: prompt.onChainId,
@@ -69,7 +69,10 @@ function buildExportPrompt(prompt: any): any {
     ownerWalletHash: prompt.owner
       ? hashWalletAddress(String(prompt.owner))
       : null,
-    // Exclude sensitive fields: encryptedPrompt, contentHash (if sensitive), full description
+    // Preserve upstream field-level authorization: cross-user admin exports
+    // omit contentHash; only the owner can export it for integrity checks.
+    ...(isSelfExport ? { contentHash: prompt.contentHash ?? null } : {}),
+    // Always exclude encryptedPrompt and full description.
     createdAt: prompt.createdAt,
     updatedAt: prompt.updatedAt,
     lifecycleState: prompt.lifecycleState,
@@ -169,16 +172,19 @@ export async function runUserExport(
     const records: any[] = [];
     // Cursor avoids loading the entire source collection before cancellation
     // can be observed. It is closed on success, failure and cancellation.
+    const isSelfExport = requestingUserId === userIdToExport;
     const cursor = Prompt.find({ owner: userIdToExport })
       .select(
-        "_id onChainId title category isActive price owner createdAt updatedAt lifecycleState lifecycleHistory",
+        "_id onChainId title category isActive price owner createdAt updatedAt lifecycleState lifecycleHistory" +
+          (isSelfExport ? " contentHash" : ""),
       )
       .lean()
       .cursor();
     try {
       for await (const prompt of cursor) {
         await execution.check();
-        if (scope !== "history") records.push(buildExportPrompt(prompt));
+        if (scope !== "history")
+          records.push(buildExportPrompt(prompt, isSelfExport));
         if (scope !== "prompt") {
           records.push(
             ...(prompt.lifecycleHistory ?? [])

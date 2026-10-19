@@ -19,6 +19,7 @@ import { provenanceService } from "../services/provenanceService";
 import {
   runUserExport,
   cleanupExpiredExports,
+  verifyExportChecksum,
 } from "../services/exportService";
 import {
   createTransfer,
@@ -162,6 +163,41 @@ describe("bulk import recovery", () => {
 });
 
 describe("export cancellation and deletion", () => {
+  it.each(["prompt", "full"] as const)(
+    "preserves owner-only contentHash authorization for %s exports",
+    async (scope) => {
+      const created = await Prompt.create({
+        ...items[0],
+        owner,
+        contentHash: "owner-private-integrity-hash",
+      });
+      const prompt = await Prompt.findById(created._id).lean();
+      const publicRecord = {
+        _id: prompt._id,
+        onChainId: prompt.onChainId,
+        title: prompt.title,
+        category: prompt.category,
+        isActive: prompt.isActive,
+        price: prompt.price,
+        ownerWalletHash: `hash-${owner}`,
+        createdAt: prompt.createdAt,
+        updatedAt: prompt.updatedAt,
+        lifecycleState: prompt.lifecycleState,
+      };
+      const self = await runUserExport(owner, undefined, scope);
+      expect(
+        verifyExportChecksum(
+          [{ ...publicRecord, contentHash: prompt.contentHash }],
+          self.integrityChecksum!,
+        ),
+      ).toBe(true);
+      const admin = await runUserExport("support-operator", owner, scope, true);
+      expect(
+        verifyExportChecksum([publicRecord], admin.integrityChecksum!),
+      ).toBe(true);
+      expect(admin.integrityChecksum).not.toBe(self.integrityChecksum);
+    },
+  );
   it("publishes a completed artifact with count/checksum and checkpoints", async () => {
     await Prompt.create({ ...items[0], owner });
     const record = await runUserExport(owner);
