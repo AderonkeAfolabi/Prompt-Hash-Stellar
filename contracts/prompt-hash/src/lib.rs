@@ -2,8 +2,12 @@
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 
+mod capability_tokens;
+mod conflict_resolver;
 mod contract;
+mod contract_tests;
 mod events;
+mod load_test;
 mod pagination;
 mod pagination_test;
 mod storage;
