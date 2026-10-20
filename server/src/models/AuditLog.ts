@@ -77,6 +77,11 @@ export const AUDIT_ACTIONS = [
   "retention_hold_created",
   "retention_hold_released",
   "retention_hold_reconciled",
+  // time-boxed maintainer access grants (#912)
+  "maintainer_grant_issued",
+  "maintainer_grant_revoked",
+  "maintainer_grant_used",
+  "maintainer_grant_denied",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];

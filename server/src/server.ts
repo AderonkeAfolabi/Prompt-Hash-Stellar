@@ -38,6 +38,7 @@ import { retentionHoldRouter } from "./routes/retentionHoldRoutes";
 import { lifecycleCaptureRouter, lifecycleReportRouter } from "./routes/lifecycleAnalyticsRoutes";
 import { adminRateLimitRouter } from "./routes/adminRateLimitRoutes";
 import { supportAccessRouter } from "./routes/supportAccessRoutes";
+import { maintainerAccessRouter } from "./routes/maintainerAccessRoutes"; // #912
 import { payoutLedgerRouter } from "./routes/payoutLedgerRoutes";
 import { entitlementRouter } from "./routes/entitlementRoutes";
 import { bundleRouter } from "./routes/bundleRoutes";
@@ -113,6 +114,7 @@ app.use("/api/recovery", operationRecoveryRouter);
 app.use("/api/receipts", receiptRouter);
 app.use("/api/admin/abuse-risk", abuseRiskRouter);
 app.use("/api/admin/retention-holds", retentionHoldRouter);
+app.use("/api/admin/maintainer-grants", maintainerAccessRouter); // #912
 app.use("/api/analytics/lifecycle", lifecycleCaptureRouter);
 app.use("/api/admin/lifecycle-analytics", lifecycleReportRouter);
 
