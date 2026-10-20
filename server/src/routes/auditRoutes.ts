@@ -15,6 +15,10 @@ import {
   exportAccessAuditLogs,
 } from "../services/auditTrail";
 import { queryConfigChangeEvidence } from "../services/adminConfigAudit";
+import {
+  AuditExportPolicyError,
+  resolveRedactionProfile,
+} from "../services/auditExportRedaction";
 
 /**
  * Audit-grade admin activity export (#783).
@@ -22,9 +26,11 @@ import { queryConfigChangeEvidence } from "../services/adminConfigAudit";
  * GET  /api/audit/export         — filtered, paged, tamper-evident export
  * POST /api/audit/export/verify  — verify a previously exported bundle
  *
- * Both require the `audit:export` admin scope. See
- * docs/operations/audit-log-usage.md for the export schema and the
- * verification procedure.
+ * Both require the `audit:export` admin scope. The export also takes
+ * `purpose` (forensic | internal_investigation | external_disclosure, default
+ * external_disclosure), which selects the redaction profile (#911). Forensic
+ * exports need `audit:export:full`. See docs/operations/audit-log-usage.md for
+ * the export schema and the verification procedure.
  */
 export const auditRouter = Router();
 
@@ -91,9 +97,25 @@ auditRouter.get(
       return;
     }
 
+    // The redaction profile comes from the caller's scopes and stated purpose,
+    // never from a client-chosen profile name (#911).
+    let access: ReturnType<typeof resolveRedactionProfile>;
+    try {
+      access = resolveRedactionProfile({
+        purpose: typeof req.query.purpose === "string" ? req.query.purpose : null,
+        scopes: req.admin?.scope ?? [],
+      });
+    } catch (err) {
+      if (err instanceof AuditExportPolicyError) {
+        res.status(err.code === "invalid_purpose" ? 400 : 403).json({ error: err.message, code: err.code });
+        return;
+      }
+      throw err;
+    }
+
     try {
       await connectDb();
-      const bundle = await exportAuditBundle(parsed.filter);
+      const bundle = await exportAuditBundle(parsed.filter, { profile: access.profile });
 
       // The export itself is admin activity: record who pulled what, without
       // echoing a raw wallet actor filter into the trail.
@@ -103,7 +125,7 @@ auditRouter.get(
         actor: req.admin?.sub ?? null,
         promptId: parsed.filter.promptId ?? null,
         requestId: req.correlationId ?? null,
-        reason: `records=${bundle.recordCount} scope=${parsed.filter.scope ?? "all"}`,
+        reason: `records=${bundle.recordCount} scope=${parsed.filter.scope ?? "all"} purpose=${access.purpose} profile=${access.profile}`,
       });
 
       res.json(bundle);
@@ -121,7 +143,7 @@ auditRouter.post(
   "/export/verify",
   requireAdminScope("audit:export"),
   async (req: AdminRequest, res: Response) => {
-    const { records, integrityChecksum } = req.body ?? {};
+    const { records, integrityChecksum, redactionProfile, schemaVersion } = req.body ?? {};
     if (!Array.isArray(records) || typeof integrityChecksum !== "string") {
       res.status(400).json({ error: "An exported bundle with records and integrityChecksum is required." });
       return;
@@ -132,7 +154,14 @@ auditRouter.post(
     }
 
     await connectDb();
-    res.json(await verifyAuditExport({ records, integrityChecksum }));
+    res.json(
+      await verifyAuditExport({
+        records,
+        integrityChecksum,
+        redactionProfile: typeof redactionProfile === "string" ? redactionProfile : undefined,
+        schemaVersion: typeof schemaVersion === "number" ? schemaVersion : undefined,
+      }),
+    );
   },
 );
 

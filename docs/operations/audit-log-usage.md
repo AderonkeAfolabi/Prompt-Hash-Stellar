@@ -317,3 +317,52 @@ event, export, and support-evidence retention.
 - [Runbook](./runbook.md) — Operational monitoring
 - [Incident Response](./incident-response.md) — Escalation procedures
 - [Security Audit](../security-audit.md) — AUD-02, AUD-04, AUD-07
+
+## Redaction profiles and export schema v2 (#911)
+
+`GET /api/audit/export` now takes a `purpose` parameter. The purpose selects a
+redaction profile, and the profile is chosen from the caller's scopes. The
+caller cannot pick a profile directly.
+
+| `purpose`                  | Profile            | Required scope        | Effect                                                                                  |
+| -------------------------- | ------------------ | --------------------- | --------------------------------------------------------------------------------------- |
+| `forensic`                 | `full`             | `audit:export:full`   | Every field exported                                                                    |
+| `internal_investigation`   | `investigation`    | `audit:export`        | `actor` pseudonymized (`anon_<16 hex>`), other fields kept                              |
+| `external_disclosure` (default) | `external_share` | `audit:export`   | `actor` pseudonymized; `walletHash`, `requestId`, and `reason` set to `[REDACTED]`      |
+
+Rules:
+
+- A purpose the caller's scopes do not allow returns **403** with `code:
+  profile_forbidden`. The export is not silently downgraded.
+- An unknown purpose returns **400** with `code: invalid_purpose`.
+- The default is the most restrictive choice. Clients that relied on full
+  exports without a `purpose` must now pass `purpose=forensic` and hold
+  `audit:export:full`.
+- The export is still recorded as `audit_export`, and the reason now includes
+  `purpose` and `profile`.
+
+Bundle changes (schema v2):
+
+- `schemaVersion: 2`, `redactionProfile`, and a `verification` block describing
+  what the checksum covers, which fields were redacted, the pseudonym scheme, and
+  how record hashes can be checked.
+- `integrityChecksum` covers the **exported** (already redacted) records, so it
+  describes exactly what was shared.
+- Bundles without `schemaVersion` are read as v1, which was always full.
+  Unsupported versions and unknown profiles are rejected by verification.
+
+Verification of redacted bundles:
+
+- `full`: each record is re-hashed from the bundle and compared with its
+  `recordHash`. It is then compared with the stored trail.
+- `investigation` and `external_share`: the bundle cannot be re-hashed, because
+  the hashed fields were removed. Each record is compared with the stored row
+  after applying the same profile, and the stored row's own integrity hash is
+  checked. `POST /api/audit/export/verify` accepts `redactionProfile` and
+  `schemaVersion` from the bundle.
+
+Pseudonyms are deterministic: `sha256("audit-export-actor:" + actor)`, truncated
+to 16 hex characters. The same actor maps to the same pseudonym within and across
+exports. The scheme is not keyed, so it hides the identifier from a casual reader
+but a known admin id can be checked against it. Treat redacted bundles as
+internal-only unless the disclosure policy says otherwise.
