@@ -101,3 +101,39 @@ including `admin_config_change`) and verify it with
   field, and the 503 response when evidence cannot be recorded.
 - Rollback of this feature: revert the route change. Records already written
   stay valid in the chain.
+
+## Schema validation and diff preview (#909)
+
+Feature-flag updates are validated against a declared schema before anything is
+written. The schema lives in `server/src/services/adminConfigSchema.ts`
+(`FEATURE_FLAG_UPDATE_SCHEMA`).
+
+- `PATCH /api/flags/:name` returns **400** with `issues` (a list of `{ path,
+  message }`) for an unknown field, a value outside its declared type or range, an
+  unknown environment, or an empty patch. Nothing is written and no audit record
+  is created. `reason` is accepted and passed through to the audit record.
+- `POST /api/flags/:name/preview` takes the same body and returns the field-level
+  diff, the rollback patch, and a plain-language rollback note. It requires
+  `flags:write`, writes nothing, and creates no audit record. Use it to review a
+  change before applying it.
+
+Example preview response:
+
+```json
+{
+  "valid": true,
+  "applied": false,
+  "name": "stellar_atomic_settlement",
+  "diff": {
+    "changes": [{ "field": "environments.production", "before": false, "after": true }],
+    "changedFields": ["environments.production"],
+    "noop": false,
+    "rollbackPatch": { "environments": { "production": false } },
+    "rollbackNotes": "To undo this change, send PATCH with {\"environments\":{\"production\":false}}. Changed fields: environments.production."
+  }
+}
+```
+
+Applied changes are still audited through `applyAuditedConfigChange` with
+before and after state, as described above. The schema check happens earlier,
+so an invalid change never reaches the audit path.

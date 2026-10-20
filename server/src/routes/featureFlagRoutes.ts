@@ -3,12 +3,18 @@ import {
   featureFlagService,
   KNOWN_FEATURE_FLAGS,
   snapshotFlag,
+  type UpdateFlagInput,
 } from "../services/featureFlagService.js";
 import { requireAdminScope, type AdminRequest } from "../middleware/adminAuth.js";
 import {
   applyAuditedConfigChange,
   AuditEvidenceUnavailableError,
 } from "../services/adminConfigAudit.js";
+import {
+  buildConfigDiffPreview,
+  FEATURE_FLAG_UPDATE_SCHEMA,
+  validateConfigInput,
+} from "../services/adminConfigSchema.js";
 import { verifyRollback } from "../services/flagRolloutGuard.js";
 
 export const featureFlagRouter = express.Router();
@@ -44,12 +50,6 @@ function sendChangeError(res: Response, err: any, fallbackStatus: number) {
     });
   }
   return res.status(fallbackStatus).json({ error: err.message });
-}
-
-function definedOnly<T extends Record<string, unknown>>(input: T): Partial<T> {
-  return Object.fromEntries(
-    Object.entries(input).filter(([, value]) => value !== undefined),
-  ) as Partial<T>;
 }
 
 featureFlagRouter.post(
@@ -119,12 +119,44 @@ featureFlagRouter.get(
   }
 );
 
+// Dry run for a flag change (#909): validates the proposed patch against the
+// update schema and returns the field-level diff plus a rollback patch. Nothing
+// is written and no audit record is created.
+featureFlagRouter.post(
+  "/:name/preview",
+  requireAdminScope("flags:write"),
+  async (req: AdminRequest, res: Response) => {
+    const name = String(req.params.name);
+    const validation = validateConfigInput(FEATURE_FLAG_UPDATE_SCHEMA, req.body ?? {});
+    if (!validation.ok) {
+      return res.status(400).json({ valid: false, issues: validation.issues });
+    }
+    try {
+      const flag = await featureFlagService.getFlag(name);
+      if (!flag) {
+        return res.status(404).json({ error: "Flag not found" });
+      }
+      const diff = buildConfigDiffPreview(snapshotFlag(flag), validation.value);
+      return res.json({ valid: true, applied: false, name: name.toLowerCase(), diff });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+);
+
 featureFlagRouter.patch(
   "/:name",
   requireAdminScope("flags:write"),
   async (req: AdminRequest, res: Response) => {
     const name = String(req.params.name);
-    const { status, environments, rolloutPercentage } = req.body ?? {};
+    // Invalid configuration is rejected before anything is written (#909).
+    const validation = validateConfigInput(FEATURE_FLAG_UPDATE_SCHEMA, req.body ?? {});
+    if (!validation.ok) {
+      return res.status(400).json({
+        error: "Invalid configuration.",
+        issues: validation.issues,
+      });
+    }
     try {
       const result = await applyAuditedConfigChange({
         ...auditContext(req),
@@ -133,10 +165,7 @@ featureFlagRouter.patch(
         operation: "update",
         load: () => featureFlagService.getFlag(name),
         apply: () =>
-          featureFlagService.updateFlag(
-            name,
-            definedOnly({ status, environments, rolloutPercentage }),
-          ),
+          featureFlagService.updateFlag(name, validation.value as UpdateFlagInput),
         restore: (before) =>
           featureFlagService.restoreFlag(name, before ? snapshotFlag(before) : null),
         snapshot: snapshotFlag,
