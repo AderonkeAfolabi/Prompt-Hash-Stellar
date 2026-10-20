@@ -2,6 +2,15 @@ import { createHash } from "crypto";
 import { AUDIT_ACTIONS, AuditLog, AuditAction, AuditResult } from "../models/AuditLog";
 import { logger } from "./structuredLogger";
 import { canonicalJson } from "./canonicalSerialization";
+import {
+  AUDIT_EXPORT_SCHEMA_VERSION,
+  REDACTION_PROFILES,
+  SUPPORTED_AUDIT_EXPORT_SCHEMA_VERSIONS,
+  buildVerificationMetadata,
+  redactExportRecord,
+  type AuditExportVerificationMetadata,
+  type RedactionProfile,
+} from "./auditExportRedaction";
 import { MaintenanceScope } from "../models/MaintenanceBanner";
 export { logger };
 
@@ -486,9 +495,14 @@ export interface AuditBundleRecord {
 
 export interface AuditBundle {
   exportVersion: number;
+  /** Bundle schema (#911). Absent on bundles written before schema v2. */
+  schemaVersion: number;
   exportedAt: string;
   recordCount: number;
   filters: Record<string, unknown>;
+  /** Redaction profile applied to `records` (#911). */
+  redactionProfile: RedactionProfile;
+  verification: AuditExportVerificationMetadata;
   records: AuditBundleRecord[];
   integrityChecksum: string;
   hasMore: boolean;
@@ -595,11 +609,17 @@ function exportChecksum(records: AuditBundleRecord[]): string {
  * result sets are paged: at most `limit` records are returned together with a
  * `nextCursor` for the following page. Client IPs are never exported.
  */
-export async function exportAuditBundle(filter: AuditBundleExportFilter): Promise<AuditBundle> {
+export async function exportAuditBundle(
+  filter: AuditBundleExportFilter,
+  options: { profile?: RedactionProfile } = {},
+): Promise<AuditBundle> {
   const limit = Math.min(
     Math.max(Math.floor(filter.limit ?? AUDIT_EXPORT_DEFAULT_LIMIT), 1),
     AUDIT_EXPORT_MAX_LIMIT,
   );
+  // Library callers keep the full record set unless they ask otherwise; the
+  // HTTP route always resolves a profile from the caller's scopes (#911).
+  const profile = options.profile ?? "full";
   const query = buildAuditExportQuery(filter);
 
   const records: AuditBundleRecord[] = [];
@@ -619,12 +639,14 @@ export async function exportAuditBundle(filter: AuditBundleExportFilter): Promis
       hasMore = true;
       break;
     }
-    records.push(toBundleRecord(row, records.length + 1));
+    // Redact before checksumming so the checksum covers what is actually shared.
+    records.push(redactExportRecord(toBundleRecord(row, records.length + 1), profile));
     last = row;
   }
 
   return {
     exportVersion: AUDIT_EXPORT_VERSION,
+    schemaVersion: AUDIT_EXPORT_SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
     recordCount: records.length,
     filters: {
@@ -637,6 +659,8 @@ export async function exportAuditBundle(filter: AuditBundleExportFilter): Promis
       after: filter.after,
       limit,
     },
+    redactionProfile: profile,
+    verification: buildVerificationMetadata(profile),
     records,
     integrityChecksum: exportChecksum(records),
     hasMore,
@@ -661,16 +685,42 @@ export interface AuditExportVerification {
 export async function verifyAuditExport(bundle: {
   records?: AuditBundleRecord[];
   integrityChecksum?: string;
+  /** Absent on schema v1 bundles, which were always full. */
+  redactionProfile?: string;
+  /** Absent on schema v1 bundles. */
+  schemaVersion?: number;
 }): Promise<AuditExportVerification> {
   const errors: string[] = [];
   const records = Array.isArray(bundle?.records) ? bundle.records : [];
+
+  const schemaVersion = bundle?.schemaVersion ?? 1;
+  const profileName = bundle?.redactionProfile ?? "full";
+  const headerErrors: string[] = [];
+  if (!SUPPORTED_AUDIT_EXPORT_SCHEMA_VERSIONS.includes(schemaVersion)) {
+    headerErrors.push(`Unsupported export schema version: ${String(schemaVersion)}.`);
+  }
+  if (!REDACTION_PROFILES.includes(profileName)) {
+    headerErrors.push(`Unknown redaction profile: ${String(profileName)}.`);
+  }
+  if (headerErrors.length > 0) {
+    return {
+      valid: false,
+      recordCount: records.length,
+      checksumValid: false,
+      errors: headerErrors,
+    };
+  }
+  const profile = profileName as RedactionProfile;
 
   const checksumValid = exportChecksum(records) === bundle?.integrityChecksum;
   if (!checksumValid) {
     errors.push("Bundle checksum mismatch: records were added, removed, reordered, or edited.");
   }
 
-  for (const record of records) {
+  // Redacted records no longer carry the fields their recordHash covers, so the
+  // bundle can only be re-hashed for full exports. Redacted exports are checked
+  // against the stored trail below, under the same profile.
+  for (const record of profile === "full" ? records : []) {
     const expected = computeRecordHash({
       action: record.action,
       result: record.result,
@@ -702,7 +752,8 @@ export async function verifyAuditExport(bundle: {
         errors.push(`Record ${record.sequence}: no stored audit record has this recordHash.`);
         continue;
       }
-      if (canonicalJson(toBundleRecord(row, record.sequence)) !== canonicalJson(record)) {
+      const expectedRecord = redactExportRecord(toBundleRecord(row, record.sequence), profile);
+      if (canonicalJson(expectedRecord) !== canonicalJson(record)) {
         errors.push(`Record ${record.sequence}: differs from the stored audit record.`);
       }
       if (computeRecordHash(hashInputFromRow(row)) !== row.recordHash) {
