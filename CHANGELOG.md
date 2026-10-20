@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Admin governance controls (Issues #909, #910, #911, #912)
+- Schema-driven config validation (#909): feature-flag PATCH bodies are checked
+  against `FEATURE_FLAG_UPDATE_SCHEMA` before any write, returning 400 with field
+  issues. `POST /api/flags/:name/preview` returns the field-level diff and a
+  rollback patch without writing. See `docs/operations/admin-config-audit.md`.
+- Permission-aware bulk action framework (#910): explicit selections with
+  expected versions, dry-run planning with per-record codes, a confirmation token
+  bound to the eligible set, and single-use execution. Not yet wired to a route.
+  See `docs/operations/bulk-actions.md`.
+- Redaction profiles for audit exports (#911): `purpose` selects `full`,
+  `investigation`, or `external_share` from the caller's scopes. Export schema v2
+  adds `schemaVersion`, `redactionProfile`, and verification metadata. See
+  `docs/operations/audit-log-usage.md`.
+- Time-boxed maintainer access grants (#912): approver-issued grants with scope,
+  reason, and expiry; no self-approval; expiry enforced per request; issuance and
+  use audited; active/expired report and revocation. See
+  `docs/operations/maintainer-access-grants.md`.
+
 #### Reliability and evidence hardening (Issues #1008, #1009, #1010, #1011)
 - Deterministic replay verification (#1008): a pure replay fold that orders
   events by `(ledger, eventId)`, collapses retries, rejects conflicting event
